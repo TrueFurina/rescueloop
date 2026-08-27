@@ -22,6 +22,17 @@ try {
     if ($LogRecords | Where-Object { -not $_.schema_version -or -not $_.run_id -or -not $_.correlation_id }) {
         throw "log context fields are incomplete"
     }
+    $env:RESCUELOOP_TEST_PANIC = "1"
+    & cargo run --quiet -p rescueloop -- --incident-dir $Incidents sources list 2>$null
+    Remove-Item Env:RESCUELOOP_TEST_PANIC
+    if ($LASTEXITCODE -eq 0) { throw "expected debug panic" }
+    $LogRecords = @(& cargo run --quiet -p rescueloop -- --incident-dir $Incidents logs --lines 1000 --output json | ForEach-Object { $_ | ConvertFrom-Json })
+    if (-not ($LogRecords | Where-Object { $_.fields.event -eq "runtime.panic" })) {
+        throw "runtime.panic log event not found"
+    }
+    if (@($LogRecords.run_id | Sort-Object -Unique).Count -lt 3) {
+        throw "expected distinct run IDs across process restarts"
+    }
     & cargo run --quiet -p rescueloop -- service status
     if ($LASTEXITCODE -ne 0) { throw "service status failed" }
     Write-Host "Windows native E2E passed."

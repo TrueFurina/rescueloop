@@ -48,8 +48,9 @@ Optional headers use comma-separated `name=value` pairs in
 `RESCUELOOP_OTLP_HEADERS`. Header values are never logged. Export is bounded and
 best-effort; network failures do not block or remove local records.
 
-Native CI validates structured startup/failure records and querying on macOS
-and Windows. Run `scripts/validate-logging.sh` locally on Unix-like systems.
+Native CI validates structured startup, restart, failure and panic records plus
+querying on macOS and Windows. Run `scripts/validate-logging.sh` locally on
+Unix-like systems.
 
 ## Event contract
 

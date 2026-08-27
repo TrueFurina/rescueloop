@@ -114,6 +114,16 @@ fn install_panic_hook() {
     }));
 }
 
+#[cfg(debug_assertions)]
+pub fn trigger_test_panic_if_requested() {
+    if std::env::var("RESCUELOOP_TEST_PANIC").as_deref() == Ok("1") {
+        panic!("requested debug panic for logging validation");
+    }
+}
+
+#[cfg(not(debug_assertions))]
+pub fn trigger_test_panic_if_requested() {}
+
 #[cfg(test)]
 mod tests {
     use super::log_directory;

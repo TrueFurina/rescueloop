@@ -13,11 +13,23 @@ if RUST_LOG=info cargo run --quiet -p rescueloop -- \
   exit 1
 fi
 
+if RESCUELOOP_TEST_PANIC=1 RUST_LOG=info cargo run --quiet -p rescueloop -- \
+  --incident-dir "$task_state_dir/incidents" sources list >/dev/null 2>&1; then
+  echo "expected debug panic" >&2
+  exit 1
+fi
+
 log_file=$(find "$task_state_dir/logs" -name 'rescueloop-*.jsonl' -type f | head -1)
 test -n "$log_file"
+records_file="$task_state_dir/records.jsonl"
+RUST_LOG=info cargo run --quiet -p rescueloop -- \
+  --incident-dir "$task_state_dir/incidents" logs --lines 1000 --output json \
+  >"$records_file"
 jq -e 'select(.schema_version == 1 and .run_id and .correlation_id and .fields.event)' \
-  "$log_file" >/dev/null
-jq -e 'select(.fields.event == "runtime.failed")' "$log_file" >/dev/null
+  "$records_file" >/dev/null
+jq -e 'select(.fields.event == "runtime.failed")' "$records_file" >/dev/null
+jq -e 'select(.fields.event == "runtime.panic")' "$records_file" >/dev/null
+test "$(jq -r '.run_id' "$records_file" | sort -u | wc -l)" -ge 3
 
 RUST_LOG=info cargo run --quiet -p rescueloop -- \
   --incident-dir "$task_state_dir/incidents" logs --event runtime.failed --output json \

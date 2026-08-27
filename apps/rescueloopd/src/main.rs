@@ -159,6 +159,7 @@ async fn main() -> Result<()> {
         pid = std::process::id(),
         "RescueLoop started"
     );
+    logging::trigger_test_panic_if_requested();
     let result = run(cli).await;
     match &result {
         Ok(()) => info!(
