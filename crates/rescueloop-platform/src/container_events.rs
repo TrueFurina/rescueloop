@@ -305,8 +305,7 @@ impl IncidentCollector for ContainerEventSource {
                 continue;
             }
             let restart_loop = self.record_failure(id);
-            let inspect = self.inspect(id).await;
-            let logs = self.diagnostic_logs(id).await;
+            let (inspect, logs) = tokio::join!(self.inspect(id), self.diagnostic_logs(id));
             return Ok(normalize_event(
                 self.engine,
                 event,

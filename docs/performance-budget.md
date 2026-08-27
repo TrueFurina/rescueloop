@@ -31,6 +31,8 @@ is a release gate, not an architectural assumption.
   newline. `inspect` and diagnostic-log output are drained but retain at most 256 KiB each, with a
   five-second deadline and process-group termination on Unix. Restart history retains at most 4,096
   active container IDs and expires inactive windows after 60 seconds.
+  `inspect` and diagnostic-log probes run concurrently, keeping enrichment latency to one deadline
+  rather than two sequential deadlines.
 - macOS Unified Log is activated only in an authorized root daemon context. A normal user agent
   does not retry a source it cannot access.
 - macOS Unified Log and Windows Event Log streams share the same 64 KiB bounded line reader as
