@@ -1,10 +1,14 @@
 use anyhow::{Context, Result, bail};
 use rescueloop_core::Incident;
 use rusqlite::{Connection, OptionalExtension, Transaction, params};
-use std::path::{Path, PathBuf};
+use std::{
+    io::Read,
+    path::{Path, PathBuf},
+};
 
 const INDEX_SCHEMA: u32 = 1;
 const INDEX_FILENAME: &str = "index-v1.db";
+const MAX_INCIDENT_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Clone, Debug)]
 pub struct IncidentIndex {
@@ -153,7 +157,7 @@ fn rebuild(path: &Path, incident_dir: &Path) -> Result<usize> {
                 if json_path.extension().and_then(|value| value.to_str()) != Some("json") {
                     continue;
                 }
-                let Ok(bytes) = std::fs::read(&json_path) else {
+                let Ok(bytes) = read_bounded_document(&json_path) else {
                     continue;
                 };
                 let Ok(incident) = serde_json::from_slice::<Incident>(&bytes) else {
@@ -176,6 +180,17 @@ fn rebuild(path: &Path, incident_dir: &Path) -> Result<usize> {
         let _ = std::fs::remove_file(temporary.with_extension("db-shm"));
     }
     result
+}
+
+fn read_bounded_document(path: &Path) -> Result<Vec<u8>> {
+    let file = std::fs::File::open(path)?;
+    let mut bytes = Vec::new();
+    file.take(MAX_INCIDENT_DOCUMENT_BYTES + 1)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() as u64 > MAX_INCIDENT_DOCUMENT_BYTES {
+        bail!("incident document exceeds size limit: {}", path.display())
+    }
+    Ok(bytes)
 }
 
 fn initialize_schema(connection: &Connection) -> Result<()> {
@@ -386,5 +401,16 @@ mod tests {
             vec![first_path]
         );
         assert!(index.paths_for_group("missing").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn rebuild_skips_oversized_incident_documents() {
+        let temp = tempfile::tempdir().unwrap();
+        let incidents = temp.path().join("incidents");
+        std::fs::create_dir_all(&incidents).unwrap();
+        let oversized = std::fs::File::create(incidents.join("oversized.json")).unwrap();
+        oversized.set_len(MAX_INCIDENT_DOCUMENT_BYTES + 1).unwrap();
+        let index = IncidentIndex::open(temp.path(), &incidents).await.unwrap();
+        assert_eq!(index.count().await.unwrap(), 0);
     }
 }

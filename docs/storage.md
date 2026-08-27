@@ -24,6 +24,9 @@ the original evidence remains recoverable from occurrence documents.
 Both paths use a same-directory synced temporary file. Immutable occurrences are published with an
 atomic no-clobber link; grouped projections use an atomic replace and directory sync on Unix. Windows
 replacement uses `MoveFileExW` with replace and write-through flags.
+Incident projections and pending observation-journal records are capped at 4 MiB when read. Both
+normal readers and disposable-index rebuilds stream only up to the limit plus one byte, preventing a
+corrupt or replaced state document from causing an unbounded allocation.
 Grouping, projection replacement, index update and initial lineage append are serialized by a
 cross-process incident-store lock. Concurrent collectors therefore cannot lose occurrence-count or
 evidence updates.

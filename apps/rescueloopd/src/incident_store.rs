@@ -6,8 +6,11 @@ use std::{
     path::{Path, PathBuf},
 };
 use tokio::fs;
+use tokio::io::AsyncReadExt;
 
 use crate::{observation_journal, storage};
+
+const MAX_INCIDENT_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
     let paths = match incident_index(dir).await {
@@ -35,7 +38,7 @@ pub(crate) async fn incidents_read_only(dir: &Path) -> Result<Vec<(Incident, Pat
 async fn load_incidents(dir: &Path, paths: Vec<PathBuf>) -> Result<Vec<(Incident, PathBuf)>> {
     let mut result = Vec::new();
     for path in paths {
-        if let Ok(bytes) = fs::read(&path).await
+        if let Ok(bytes) = read_bounded_document(&path, MAX_INCIDENT_DOCUMENT_BYTES).await
             && let Ok(incident) = serde_json::from_slice::<Incident>(&bytes)
         {
             result.push((incident, path));
@@ -69,6 +72,21 @@ async fn load_incidents(dir: &Path, paths: Vec<PathBuf>) -> Result<Vec<(Incident
     });
     result.sort_by_key(|item| std::cmp::Reverse(item.0.observed_at));
     Ok(result)
+}
+
+async fn read_bounded_document(path: &Path, limit: u64) -> Result<Vec<u8>> {
+    let file = fs::File::open(path).await?;
+    let mut reader = file.take(limit + 1);
+    let mut bytes = Vec::new();
+    reader.read_to_end(&mut bytes).await?;
+    if bytes.len() as u64 > limit {
+        anyhow::bail!(
+            "incident document exceeds {} bytes: {}",
+            limit,
+            path.display()
+        )
+    }
+    Ok(bytes)
 }
 
 async fn incident_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {

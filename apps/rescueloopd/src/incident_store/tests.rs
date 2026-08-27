@@ -128,3 +128,18 @@ async fn recovery_does_not_reapply_a_persisted_projection() {
     );
     fs::remove_dir_all(root).await.unwrap();
 }
+
+#[tokio::test]
+async fn rejects_oversized_incident_document_without_allocating_it() {
+    let root = std::env::temp_dir().join(format!("rescueloop-store-{}", uuid::Uuid::new_v4()));
+    let path = root.join("oversized.json");
+    fs::create_dir_all(&root).await.unwrap();
+    let file = std::fs::File::create(&path).unwrap();
+    file.set_len(MAX_INCIDENT_DOCUMENT_BYTES + 1).unwrap();
+    assert!(
+        read_bounded_document(&path, MAX_INCIDENT_DOCUMENT_BYTES)
+            .await
+            .is_err()
+    );
+    fs::remove_dir_all(root).await.unwrap();
+}

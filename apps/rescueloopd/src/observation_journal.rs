@@ -2,8 +2,11 @@ use anyhow::{Context, Result};
 use rescueloop_core::Incident;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
+use tokio::io::AsyncReadExt;
 
 use crate::storage;
+
+const MAX_JOURNAL_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
 
 #[derive(Serialize, Deserialize)]
 struct PendingObservation {
@@ -42,7 +45,14 @@ pub async fn pending(incident_dir: &Path) -> Result<Vec<Pending>> {
     paths.sort();
     let mut result = Vec::with_capacity(paths.len());
     for path in paths {
-        let value: PendingObservation = serde_json::from_slice(&tokio::fs::read(&path).await?)
+        let file = tokio::fs::File::open(&path).await?;
+        let mut reader = file.take(MAX_JOURNAL_DOCUMENT_BYTES + 1);
+        let mut bytes = Vec::new();
+        reader.read_to_end(&mut bytes).await?;
+        if bytes.len() as u64 > MAX_JOURNAL_DOCUMENT_BYTES {
+            anyhow::bail!("observation journal is oversized: {}", path.display())
+        }
+        let value: PendingObservation = serde_json::from_slice(&bytes)
             .with_context(|| format!("invalid observation journal: {}", path.display()))?;
         if value.schema_version != 1 {
             anyhow::bail!(
@@ -67,4 +77,22 @@ fn journal_directory(incident_dir: &Path) -> PathBuf {
         .parent()
         .unwrap_or(incident_dir)
         .join("observation-journal")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn rejects_oversized_pending_transaction() {
+        let root =
+            std::env::temp_dir().join(format!("rescueloop-journal-{}", uuid::Uuid::new_v4()));
+        let incidents = root.join("incidents");
+        let directory = journal_directory(&incidents);
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        let file = std::fs::File::create(directory.join("oversized.json")).unwrap();
+        file.set_len(MAX_JOURNAL_DOCUMENT_BYTES + 1).unwrap();
+        assert!(pending(&incidents).await.is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
 }
