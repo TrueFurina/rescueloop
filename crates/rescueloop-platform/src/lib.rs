@@ -15,7 +15,15 @@ pub fn event_sources(enabled: &[String]) -> Result<Vec<Box<dyn IncidentCollector
     let has = |name: &str| enabled.iter().any(|value| value == name);
     let mut sources = Vec::new();
     if has("system-artifacts") {
-        sources.push(system_collector()?);
+        match system_collector() {
+            Ok(source) => sources.push(source),
+            Err(error) => tracing::warn!(
+                event = "source.unavailable",
+                source = "system-artifacts",
+                error = %format!("{error:#}"),
+                "Optional event source is unavailable"
+            ),
+        }
     }
     if has("containers") {
         sources.extend(container_events::available_sources());

@@ -12,6 +12,8 @@
   draining, command deadline termination, container-ID validation and bounded restart history.
 - Every watcher exit path is funneled through cancellation and task joining. Persistence failure,
   drain timeout and unexpected worker completion return failure only after workers are stopped.
+- Source assembly tolerates an unavailable optional collector and starts remaining enabled sources;
+  startup fails only when no enabled collector is actually available.
 - OOM race: Docker `oom` and `die` grouped into one `OutOfMemory` incident.
 - Container repair: exact evidenced container restarted, verified running, receipt persisted, lifecycle marked fixed.
 - File quarantine, cache regeneration, JSON patch, and POSIX permission rollback: tested.
