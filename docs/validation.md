@@ -15,6 +15,8 @@
   drain timeout and unexpected worker completion return failure only after workers are stopped.
 - Source assembly tolerates an unavailable optional collector and starts remaining enabled sources;
   startup fails only when no enabled collector is actually available.
+- Windows Event Log uses a native XPath allowlist for SCM 7031/7034, resource exhaustion, WER 1001
+  and Kernel-Power 41. A second Rust classifier rejects any non-objective record that reaches stdout.
 - OOM race: Docker `oom` and `die` grouped into one `OutOfMemory` incident.
 - Container repair: exact evidenced container restarted, verified running, receipt persisted, lifecycle marked fixed.
 - File quarantine, cache regeneration, JSON patch, and POSIX permission rollback: tested.

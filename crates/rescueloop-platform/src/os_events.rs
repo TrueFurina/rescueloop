@@ -1,4 +1,27 @@
 use rescueloop_core::IncidentCollector;
+#[cfg(any(target_os = "windows", test))]
+use rescueloop_core::IncidentKind;
+
+#[cfg(any(target_os = "windows", test))]
+fn windows_event_kind(provider: &str, id: u32, message: &str) -> Option<IncidentKind> {
+    let provider = provider.to_ascii_lowercase();
+    if provider == "service control manager" && matches!(id, 7031 | 7034) {
+        return Some(IncidentKind::ServiceFailure);
+    }
+    if provider.contains("resource-exhaustion-detector") {
+        return Some(IncidentKind::OutOfMemory);
+    }
+    if provider.contains("wer-systemerrorreporting") && id == 1001 {
+        return Some(IncidentKind::Crash);
+    }
+    if provider.contains("kernel-power") && id == 41 {
+        return Some(IncidentKind::ResourceTermination);
+    }
+    let message = message.to_ascii_lowercase();
+    (provider.contains("resource")
+        && (message.contains("out of memory") || message.contains("resource exhaustion")))
+    .then_some(IncidentKind::OutOfMemory)
+}
 
 pub fn available_sources() -> Vec<Box<dyn IncidentCollector>> {
     #[cfg(target_os = "macos")]
@@ -214,9 +237,9 @@ mod windows {
 
     impl WindowsEventSource {
         async fn connect(&mut self) -> Result<()> {
-            let script = r#"$q=[System.Diagnostics.Eventing.Reader.EventLogQuery]::new('System',[System.Diagnostics.Eventing.Reader.PathType]::LogName,'*[System[(Level=1 or Level=2)]]');$w=[System.Diagnostics.Eventing.Reader.EventLogWatcher]::new($q);Register-ObjectEvent $w EventRecordWritten -Action {$r=$Event.SourceEventArgs.EventRecord;if($r){$sid=$null;try{$x=[xml]$r.ToXml();$d=@($x.Event.EventData.Data);$named=$d|Where-Object{$_.Name -match 'ServiceName|param1'}|Select-Object -First 1;if($named){$sid=[string]$named.'#text'}elseif($d.Count -gt 0){$sid=[string]$d[0].'#text'}}catch{};@{provider=$r.ProviderName;id=$r.Id;message=$r.FormatDescription();service_id=$sid}|ConvertTo-Json -Compress}}|Out-Null;$w.Enabled=$true;while($true){Wait-Event|Remove-Event}"#;
+            let script = r#"$xpath=\"*[System[(Provider[@Name='Service Control Manager'] and (EventID=7031 or EventID=7034)) or Provider[@Name='Microsoft-Windows-Resource-Exhaustion-Detector'] or (Provider[@Name='Microsoft-Windows-WER-SystemErrorReporting'] and EventID=1001) or (Provider[@Name='Microsoft-Windows-Kernel-Power'] and EventID=41)]]\";$q=[System.Diagnostics.Eventing.Reader.EventLogQuery]::new('System',[System.Diagnostics.Eventing.Reader.PathType]::LogName,$xpath);$w=[System.Diagnostics.Eventing.Reader.EventLogWatcher]::new($q);Register-ObjectEvent $w EventRecordWritten -Action {$r=$Event.SourceEventArgs.EventRecord;if($r){$sid=$null;try{$x=[xml]$r.ToXml();$d=@($x.Event.EventData.Data);$named=$d|Where-Object{$_.Name -match 'ServiceName|param1'}|Select-Object -First 1;if($named){$sid=[string]$named.'#text'}elseif($d.Count -gt 0){$sid=[string]$d[0].'#text'}}catch{};@{provider=$r.ProviderName;id=$r.Id;message=$r.FormatDescription();service_id=$sid}|ConvertTo-Json -Compress}}|Out-Null;$w.Enabled=$true;while($true){Wait-Event|Remove-Event}"#.replace("\\\"", "\"");
             let mut child = Command::new("powershell.exe")
-                .args(["-NoProfile", "-NonInteractive", "-Command", script])
+                .args(["-NoProfile", "-NonInteractive", "-Command", script.as_str()])
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
@@ -262,13 +285,11 @@ mod windows {
                 let Ok(event) = serde_json::from_slice::<Event>(&line) else {
                     continue;
                 };
-                let lower = event.message.to_ascii_lowercase();
-                let kind =
-                    if lower.contains("out of memory") || lower.contains("resource exhaustion") {
-                        IncidentKind::OutOfMemory
-                    } else {
-                        IncidentKind::ServiceFailure
-                    };
+                let Some(kind) =
+                    super::windows_event_kind(&event.provider, event.id, &event.message)
+                else {
+                    continue;
+                };
                 let mut fields = BTreeMap::new();
                 fields.insert("provider".into(), Value::String(event.provider.clone()));
                 fields.insert("event_id".into(), serde_json::json!(event.id));
@@ -295,5 +316,28 @@ mod windows {
                 return Ok(incident);
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::windows_event_kind;
+    use rescueloop_core::IncidentKind;
+
+    #[test]
+    fn allowlists_objective_windows_failures() {
+        assert_eq!(
+            windows_event_kind("Service Control Manager", 7031, "terminated"),
+            Some(IncidentKind::ServiceFailure)
+        );
+        assert_eq!(
+            windows_event_kind(
+                "Microsoft-Windows-Resource-Exhaustion-Detector",
+                2004,
+                "low"
+            ),
+            Some(IncidentKind::OutOfMemory)
+        );
+        assert_eq!(windows_event_kind("Disk", 7, "bad block"), None);
     }
 }
