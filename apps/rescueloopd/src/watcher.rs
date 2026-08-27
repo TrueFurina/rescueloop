@@ -53,36 +53,69 @@ pub async fn run(directory: &Path) -> Result<()> {
 
     let shutdown = shutdown_signal();
     tokio::pin!(shutdown);
-    let exhausted = loop {
+    let outcome: Result<bool> = loop {
         tokio::select! {
             signal = &mut shutdown => {
-                signal?;
-                info!(event = "watch.shutdown_requested", "Watcher shutdown requested");
-                break false;
+                match signal {
+                    Ok(()) => {
+                        info!(event = "watch.shutdown_requested", "Watcher shutdown requested");
+                        break Ok(false);
+                    }
+                    Err(error) => break Err(error),
+                }
             }
             event = events.recv() => match event {
-                Some(incident) => persist(directory, incident, &health).await?,
-                None => break true,
-            }
+                Some(incident) => {
+                    if let Err(error) = persist(directory, incident, &health).await {
+                        break Err(error);
+                    }
+                }
+                None => break Ok(true),
+            },
+            task = tasks.join_next() => match task {
+                Some(Ok(())) => break Err(anyhow::anyhow!("observation worker stopped unexpectedly")),
+                Some(Err(error)) => break Err(error.into()),
+                None => break Err(anyhow::anyhow!("observation worker set became empty")),
+            },
         }
     };
 
     cancellation.cancel();
-    let drain = async {
-        while let Some(incident) = events.recv().await {
-            persist(directory, incident, &health).await?;
-        }
-        Ok::<_, anyhow::Error>(())
+    let (exhausted, mut failure) = match outcome {
+        Ok(exhausted) => (exhausted, None),
+        Err(error) => (false, Some(error)),
     };
-    match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain).await {
-        Ok(result) => result?,
-        Err(_) => warn!(
-            event = "watch.drain_timeout",
-            queue_depth = health.snapshot().queue_depth,
-            "Watcher shutdown drain timed out"
-        ),
+    if failure.is_none() {
+        let drain = async {
+            while let Some(incident) = events.recv().await {
+                persist(directory, incident, &health).await?;
+            }
+            Ok::<_, anyhow::Error>(())
+        };
+        match tokio::time::timeout(SHUTDOWN_DRAIN_TIMEOUT, drain).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => failure = Some(error),
+            Err(_) => {
+                warn!(
+                    event = "watch.drain_timeout",
+                    queue_depth = health.snapshot().queue_depth,
+                    "Watcher shutdown drain timed out"
+                );
+                failure = Some(anyhow::anyhow!("watcher shutdown drain timed out"));
+            }
+        }
     }
-    while tasks.join_next().await.is_some() {}
+    while let Some(result) = tasks.join_next().await {
+        if let Err(error) = result
+            && failure.is_none()
+        {
+            failure = Some(error.into());
+        }
+    }
+
+    if let Some(error) = failure {
+        return Err(error);
+    }
 
     if exhausted {
         error!(

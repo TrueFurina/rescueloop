@@ -10,6 +10,8 @@
   durable occurrence publication, then proves the next ingestion replays the journal exactly once.
 - Container-source unit gates cover oversized event resynchronization, bounded command-output
   draining, command deadline termination, container-ID validation and bounded restart history.
+- Every watcher exit path is funneled through cancellation and task joining. Persistence failure,
+  drain timeout and unexpected worker completion return failure only after workers are stopped.
 - OOM race: Docker `oom` and `die` grouped into one `OutOfMemory` incident.
 - Container repair: exact evidenced container restarted, verified running, receipt persisted, lifecycle marked fixed.
 - File quarantine, cache regeneration, JSON patch, and POSIX permission rollback: tested.
