@@ -21,14 +21,18 @@ mod macos {
     use serde_json::Value;
     use std::{collections::BTreeMap, process::Stdio};
     use tokio::{
-        io::{AsyncBufReadExt, BufReader, Lines},
+        io::BufReader,
         process::{Child, ChildStdout, Command},
     };
+
+    use crate::bounded_io::{self, Line};
+
+    const MAX_EVENT_BYTES: usize = 64 * 1024;
 
     #[derive(Default)]
     pub struct MacOsLogSource {
         child: Option<Child>,
-        lines: Option<Lines<BufReader<ChildStdout>>>,
+        events: Option<BufReader<ChildStdout>>,
     }
 
     impl MacOsLogSource {
@@ -54,7 +58,7 @@ mod macos {
                 .stdout
                 .take()
                 .context("Unified Log stream has no stdout")?;
-            self.lines = Some(BufReader::new(stdout).lines());
+            self.events = Some(BufReader::new(stdout));
             self.child = Some(child);
             Ok(())
         }
@@ -83,22 +87,25 @@ mod macos {
         }
 
         async fn next_incident(&mut self) -> Result<Incident> {
-            if self.lines.is_none() {
+            if self.events.is_none() {
                 self.connect().await?;
             }
             loop {
-                let Some(line) = self
-                    .lines
-                    .as_mut()
-                    .context("Unified Log disconnected")?
-                    .next_line()
-                    .await?
-                else {
-                    self.lines = None;
-                    self.child = None;
-                    bail!("macOS Unified Log stream closed")
+                let line = bounded_io::read_line(
+                    self.events.as_mut().context("Unified Log disconnected")?,
+                    MAX_EVENT_BYTES,
+                )
+                .await?;
+                let line = match line {
+                    Line::Value(line) => line,
+                    Line::Oversized => continue,
+                    Line::End => {
+                        self.events = None;
+                        self.child = None;
+                        bail!("macOS Unified Log stream closed")
+                    }
                 };
-                let Ok(value) = serde_json::from_str::<Value>(&line) else {
+                let Ok(value) = serde_json::from_slice::<Value>(&line) else {
                     continue;
                 };
                 let message = value
@@ -183,14 +190,18 @@ mod windows {
     use serde_json::Value;
     use std::{collections::BTreeMap, process::Stdio};
     use tokio::{
-        io::{AsyncBufReadExt, BufReader, Lines},
+        io::BufReader,
         process::{Child, ChildStdout, Command},
     };
+
+    use crate::bounded_io::{self, Line};
+
+    const MAX_EVENT_BYTES: usize = 64 * 1024;
 
     #[derive(Default)]
     pub struct WindowsEventSource {
         child: Option<Child>,
-        lines: Option<Lines<BufReader<ChildStdout>>>,
+        events: Option<BufReader<ChildStdout>>,
     }
     #[derive(Deserialize)]
     struct Event {
@@ -212,15 +223,12 @@ mod windows {
                 .kill_on_drop(true)
                 .spawn()
                 .context("failed to subscribe to Windows Event Log")?;
-            self.lines = Some(
-                BufReader::new(
-                    child
-                        .stdout
-                        .take()
-                        .context("Windows event stream has no stdout")?,
-                )
-                .lines(),
-            );
+            self.events = Some(BufReader::new(
+                child
+                    .stdout
+                    .take()
+                    .context("Windows event stream has no stdout")?,
+            ));
             self.child = Some(child);
             Ok(())
         }
@@ -231,22 +239,27 @@ mod windows {
             "windows-event-log"
         }
         async fn next_incident(&mut self) -> Result<Incident> {
-            if self.lines.is_none() {
+            if self.events.is_none() {
                 self.connect().await?;
             }
             loop {
-                let Some(line) = self
-                    .lines
-                    .as_mut()
-                    .context("Windows Event Log disconnected")?
-                    .next_line()
-                    .await?
-                else {
-                    self.lines = None;
-                    self.child = None;
-                    bail!("Windows Event Log stream closed")
+                let line = bounded_io::read_line(
+                    self.events
+                        .as_mut()
+                        .context("Windows Event Log disconnected")?,
+                    MAX_EVENT_BYTES,
+                )
+                .await?;
+                let line = match line {
+                    Line::Value(line) => line,
+                    Line::Oversized => continue,
+                    Line::End => {
+                        self.events = None;
+                        self.child = None;
+                        bail!("Windows Event Log stream closed")
+                    }
                 };
-                let Ok(event) = serde_json::from_str::<Event>(&line) else {
+                let Ok(event) = serde_json::from_slice::<Event>(&line) else {
                     continue;
                 };
                 let lower = event.message.to_ascii_lowercase();

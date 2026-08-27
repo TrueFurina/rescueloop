@@ -2,8 +2,9 @@ use anyhow::{Context, Result, bail};
 use rescueloop_core::{Confidence, Evidence, Incident, IncidentKind, LaunchContext};
 use std::process::Stdio;
 use std::{collections::BTreeMap, path::Path, time::Instant};
-use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
+
+use crate::bounded_io;
 
 #[tracing::instrument(
     name = "supervision.run",
@@ -54,8 +55,11 @@ async fn supervise_inner(
         .stderr
         .take()
         .context("failed to capture process stderr")?;
-    let (status, stdout, stderr) =
-        tokio::join!(child.wait(), drain_bounded(stdout), drain_bounded(stderr));
+    let (status, stdout, stderr) = tokio::join!(
+        child.wait(),
+        bounded_io::drain(stdout, 16 * 1024),
+        bounded_io::drain(stderr, 16 * 1024)
+    );
     let status = status?;
     let stdout = stdout?;
     let stderr = stderr?;
@@ -118,21 +122,6 @@ async fn supervise_inner(
         working_directory: std::env::current_dir().ok(),
     });
     Ok(Some(incident))
-}
-
-async fn drain_bounded(mut reader: impl AsyncRead + Unpin) -> std::io::Result<Vec<u8>> {
-    const RETAIN_LIMIT: usize = 16 * 1024;
-    let mut retained = Vec::new();
-    let mut buffer = [0_u8; 4096];
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        let remaining = RETAIN_LIMIT.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
-    Ok(retained)
 }
 
 fn diagnostic_output_lines(stdout: &[u8], stderr: &[u8]) -> Vec<String> {

@@ -7,15 +7,16 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
-    io,
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
+    io::BufReader,
     process::{Child, ChildStdout, Command},
 };
+
+use crate::bounded_io::{self, Line};
 
 const FAILURE_ACTIONS: &[&str] = &["die", "oom", "health_status: unhealthy"];
 const MAX_EVENT_BYTES: usize = 64 * 1024;
@@ -212,8 +213,8 @@ async fn bounded_command_with_timeout(
         .stderr
         .take()
         .context("container command has no stderr")?;
-    let stdout = tokio::spawn(read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES));
-    let stderr = tokio::spawn(read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES));
+    let stdout = tokio::spawn(bounded_io::drain(stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr = tokio::spawn(bounded_io::drain(stderr, MAX_COMMAND_OUTPUT_BYTES));
     let status = match tokio::time::timeout(timeout, child.wait()).await {
         Ok(status) => status?,
         Err(_) => {
@@ -238,60 +239,6 @@ async fn terminate_child(child: &mut Child) {
         return;
     }
     let _ = child.kill().await;
-}
-
-async fn read_bounded(mut reader: impl AsyncRead + Unpin, limit: usize) -> io::Result<Vec<u8>> {
-    let mut retained = Vec::with_capacity(limit.min(8 * 1024));
-    let mut buffer = [0_u8; 8 * 1024];
-    loop {
-        let read = reader.read(&mut buffer).await?;
-        if read == 0 {
-            break;
-        }
-        let remaining = limit.saturating_sub(retained.len());
-        retained.extend_from_slice(&buffer[..read.min(remaining)]);
-    }
-    Ok(retained)
-}
-
-enum EventLine {
-    Line(Vec<u8>),
-    Oversized,
-    End,
-}
-
-async fn read_event_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<EventLine> {
-    let mut retained = Vec::with_capacity(1024);
-    let mut oversized = false;
-    loop {
-        let available = reader.fill_buf().await?;
-        if available.is_empty() {
-            return if retained.is_empty() {
-                Ok(EventLine::End)
-            } else if oversized {
-                Ok(EventLine::Oversized)
-            } else {
-                Ok(EventLine::Line(retained))
-            };
-        }
-        let newline = available.iter().position(|byte| *byte == b'\n');
-        let consumed = newline.map_or(available.len(), |index| index + 1);
-        let content = newline.map_or(available, |index| &available[..index]);
-        let remaining = MAX_EVENT_BYTES.saturating_sub(retained.len());
-        retained.extend_from_slice(&content[..content.len().min(remaining)]);
-        oversized |= content.len() > remaining;
-        reader.consume(consumed);
-        if newline.is_some() {
-            if retained.last() == Some(&b'\r') {
-                retained.pop();
-            }
-            return if oversized {
-                Ok(EventLine::Oversized)
-            } else {
-                Ok(EventLine::Line(retained))
-            };
-        }
-    }
 }
 
 fn valid_container_id(id: &str) -> bool {
@@ -327,16 +274,17 @@ impl IncidentCollector for ContainerEventSource {
             self.connect().await?;
         }
         loop {
-            let line = read_event_line(
+            let line = bounded_io::read_line(
                 self.events
                     .as_mut()
                     .context("container event source disconnected")?,
+                MAX_EVENT_BYTES,
             )
             .await?;
             let line = match line {
-                EventLine::Line(line) => line,
-                EventLine::Oversized => continue,
-                EventLine::End => {
+                Line::Value(line) => line,
+                Line::Oversized => continue,
+                Line::End => {
                     self.events = None;
                     self.process = None;
                     bail!("{} event stream closed", self.engine)
@@ -518,7 +466,7 @@ mod tests {
             use tokio::io::AsyncWriteExt;
             writer.write_all(&vec![b'x'; 32 * 1024]).await.unwrap();
         });
-        let retained = read_bounded(reader, 4096).await.unwrap();
+        let retained = bounded_io::drain(reader, 4096).await.unwrap();
         write.await.unwrap();
         assert_eq!(retained.len(), 4096);
     }
@@ -536,12 +484,14 @@ mod tests {
         });
         let mut reader = BufReader::new(reader);
         assert!(matches!(
-            read_event_line(&mut reader).await.unwrap(),
-            EventLine::Oversized
+            bounded_io::read_line(&mut reader, MAX_EVENT_BYTES)
+                .await
+                .unwrap(),
+            Line::Oversized
         ));
         assert!(matches!(
-            read_event_line(&mut reader).await.unwrap(),
-            EventLine::Line(line) if line == b"{}"
+            bounded_io::read_line(&mut reader, MAX_EVENT_BYTES).await.unwrap(),
+            Line::Value(line) if line == b"{}"
         ));
         write.await.unwrap();
     }

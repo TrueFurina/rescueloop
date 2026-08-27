@@ -28,6 +28,10 @@ is a release gate, not an architectural assumption.
   active container IDs and expires inactive windows after 60 seconds.
 - macOS Unified Log is activated only in an authorized root daemon context. A normal user agent
   does not retry a source it cannot access.
+- macOS Unified Log and Windows Event Log streams share the same 64 KiB bounded line reader as
+  container events. Oversized records are discarded and the stream resynchronizes at the newline.
+- Supervised-process stdout and stderr are fully drained to prevent child deadlock while retaining
+  no more than 16 KiB per stream for bounded diagnostics.
 
 ## Budgets
 

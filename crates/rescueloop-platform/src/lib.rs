@@ -1,4 +1,5 @@
 mod artifact_watcher;
+mod bounded_io;
 mod container_events;
 mod diagnostics;
 mod os_events;
