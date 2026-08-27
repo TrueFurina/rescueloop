@@ -94,7 +94,14 @@ fn parse_entries(content: &str) -> Result<Vec<LedgerEntry>> {
 )]
 pub async fn append(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
     let path = path.to_path_buf();
-    tokio::task::spawn_blocking(move || append_locked(&path, new)).await?
+    tokio::task::spawn_blocking(move || append_locked(&path, new, false))
+        .await??
+        .context("unconditional ledger append was skipped")
+}
+
+pub async fn append_if_missing(path: &Path, new: NewLedgerEntry) -> Result<Option<LedgerEntry>> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || append_locked(&path, new, true)).await?
 }
 
 fn load_locked(path: &Path) -> Result<Vec<LedgerEntry>> {
@@ -121,7 +128,11 @@ fn read_entries(file: &File) -> Result<Vec<LedgerEntry>> {
     parse_entries(&content)
 }
 
-fn append_locked(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
+fn append_locked(
+    path: &Path,
+    new: NewLedgerEntry,
+    skip_existing_incident: bool,
+) -> Result<Option<LedgerEntry>> {
     let parent = path.parent().unwrap_or(Path::new("."));
     fs::create_dir_all(parent)?;
     let existed = path.exists();
@@ -132,6 +143,14 @@ fn append_locked(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
         .open(path)?;
     file.lock_exclusive()?;
     let prior = read_entries(&file)?;
+    if skip_existing_incident
+        && prior
+            .iter()
+            .any(|entry| entry.incident_id == new.incident.id)
+    {
+        FileExt::unlock(&file)?;
+        return Ok(None);
+    }
     let (relation, related_entry) = classify(&prior, &new);
     let mut entry = LedgerEntry {
         schema_version: 1,
@@ -166,7 +185,7 @@ fn append_locked(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
     if !existed {
         sync_directory(parent)?;
     }
-    Ok(entry)
+    Ok(Some(entry))
 }
 
 #[cfg(unix)]
@@ -379,5 +398,27 @@ mod tests {
                 pair[1].previous_hash.as_deref() == Some(pair[0].entry_hash.as_str())
             })
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn initial_entry_check_and_append_is_atomic() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        let incident = incident("oom", "1");
+        let tasks = (0..16)
+            .map(|_| {
+                let path = path.clone();
+                let incident = incident.clone();
+                tokio::spawn(async move {
+                    append_if_missing(&path, new(incident, IncidentStatus::Detected)).await
+                })
+            })
+            .collect::<Vec<_>>();
+        let mut appended = 0;
+        for task in tasks {
+            appended += usize::from(task.await.unwrap().unwrap().is_some());
+        }
+        assert_eq!(appended, 1);
+        assert_eq!(load(&path).await.unwrap().len(), 1);
     }
 }

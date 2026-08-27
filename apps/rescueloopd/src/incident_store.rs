@@ -271,14 +271,7 @@ fn abort_after_occurrence_if_requested() {}
 
 async fn ensure_initial_lineage(dir: &Path, incident: &Incident) -> Result<()> {
     let ledger = ledger_path(dir);
-    if rescueloop_ledger::load(&ledger)
-        .await?
-        .iter()
-        .any(|entry| entry.incident_id == incident.id)
-    {
-        return Ok(());
-    }
-    let entry = rescueloop_ledger::append(
+    let entry = rescueloop_ledger::append_if_missing(
         &ledger,
         rescueloop_ledger::NewLedgerEntry {
             incident: incident.clone(),
@@ -291,6 +284,9 @@ async fn ensure_initial_lineage(dir: &Path, incident: &Incident) -> Result<()> {
         },
     )
     .await?;
+    let Some(entry) = entry else {
+        return Ok(());
+    };
     tracing::info!(
         event = "lineage.appended",
         incident_id = %incident.id,

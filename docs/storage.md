@@ -11,6 +11,9 @@ must not rewrite all documents during an ordinary update.
 Ledger readers take a shared file lock and appenders take an exclusive cross-process lock. Each
 encoded entry, newline and hash-chain link is written as one locked append and synced before the
 lock is released, preventing concurrent watcher/CLI processes from forking the chain.
+Initial-lineage recovery uses one atomic `append_if_missing` operation: chain validation, duplicate
+check and append happen under the same lock. This removes the previous second full-ledger read and
+prevents concurrent recovery from creating duplicate initial entries.
 
 Every normalized event is first persisted as an immutable occurrence using `create_new`. The grouped
 incident document is a compact UI projection that may advance its occurrence count and last-seen time;
