@@ -1,0 +1,22 @@
+[package]
+name = "rescueloop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+chrono.workspace = true
+crossterm.workspace = true
+rescueloop-agent = { path = "../../crates/rescueloop-agent" }
+rescueloop-core = { path = "../../crates/rescueloop-core" }
+rescueloop-ledger = { path = "../../crates/rescueloop-ledger" }
+rescueloop-platform = { path = "../../crates/rescueloop-platform" }
+rescueloop-repair = { path = "../../crates/rescueloop-repair" }
+ratatui.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true

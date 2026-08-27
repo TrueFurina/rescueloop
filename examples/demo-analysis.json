@@ -1,0 +1,21 @@
+{
+  "summary": "The startup failure is correlated with the broken plugin fixture.",
+  "hypotheses": [
+    {
+      "cause": "Plugin initialization failure",
+      "confidence": 0.99,
+      "evidence_indexes": [0]
+    }
+  ],
+  "proposed_actions": [
+    {
+      "action_type": "quarantine_path",
+      "reason": "Temporarily isolate only the failing plugin and retry the exact launch.",
+      "parameters": {
+        "target": "/Users/ostapbelei/Desktop/hmmm/RescueLoop/examples/demo-app/plugins/broken.plugin"
+      },
+      "reversible": true
+    }
+  ],
+  "needs_more_evidence": false
+}
