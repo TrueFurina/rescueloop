@@ -69,17 +69,34 @@ impl IncidentIndex {
     /// Returns only projections that share a stable grouping key. Callers still
     /// validate the JSON source of truth and ledger status before mutating it.
     pub async fn paths_for_group(&self, group_key: &str) -> Result<Vec<PathBuf>> {
+        self.paths_for_group_query(group_key, false).await
+    }
+
+    pub async fn paths_for_group_or_legacy(&self, group_key: &str) -> Result<Vec<PathBuf>> {
+        self.paths_for_group_query(group_key, true).await
+    }
+
+    async fn paths_for_group_query(
+        &self,
+        group_key: &str,
+        include_legacy: bool,
+    ) -> Result<Vec<PathBuf>> {
         let path = self.path.clone();
         let incident_dir = self.incident_dir.clone();
         let group_key = group_key.to_owned();
         tokio::task::spawn_blocking(move || {
             open_or_rebuild(&path, &incident_dir)?;
             let connection = open_connection(&path)?;
-            let mut query = connection.prepare(
+            let sql = if include_legacy {
+                "SELECT json_path FROM incidents
+                 WHERE group_key = ?1 OR group_key = ''
+                 ORDER BY last_observed_at DESC, observed_at DESC"
+            } else {
                 "SELECT json_path FROM incidents
                  WHERE group_key = ?1
-                 ORDER BY last_observed_at DESC, observed_at DESC",
-            )?;
+                 ORDER BY last_observed_at DESC, observed_at DESC"
+            };
+            let mut query = connection.prepare(sql)?;
             let rows = query.query_map([group_key], |row| row.get::<_, String>(0))?;
             Ok::<_, anyhow::Error>(rows.flatten().map(PathBuf::from).collect())
         })
@@ -401,6 +418,23 @@ mod tests {
             vec![first_path]
         );
         assert!(index.paths_for_group("missing").await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn group_lookup_includes_only_target_and_legacy_candidates() {
+        let temp = tempfile::tempdir().unwrap();
+        let incidents = temp.path().join("incidents");
+        let target = incident("target");
+        let target_path = write_incident(&incidents, &target);
+        let mut legacy = incident("legacy");
+        legacy.group_key.clear();
+        let legacy_path = write_incident(&incidents, &legacy);
+        write_incident(&incidents, &incident("unrelated"));
+        let index = IncidentIndex::open(temp.path(), &incidents).await.unwrap();
+        let paths = index.paths_for_group_or_legacy("target").await.unwrap();
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains(&target_path));
+        assert!(paths.contains(&legacy_path));
     }
 
     #[tokio::test]

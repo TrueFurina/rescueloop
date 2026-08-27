@@ -15,6 +15,8 @@ is a release gate, not an architectural assumption.
 - Each ingestion reuses one validated disposable-index handle for group lookup and projection upsert;
   guaranteed-new occurrences skip the duplicate lookup. This avoids repeated SQLite `quick_check`
   and directory reconciliation inside the same store transaction.
+- New fingerprint groups query only their exact `group_key` plus legacy rows with an empty key.
+  Compatibility no longer requires loading every unrelated incident document.
 - Native artifact callbacks use a 1,024-path bounded queue. Overflow triggers a recursive
   reconciliation whose scanner streams through a 256-path bounded channel, so recovery does not
   materialize the watched directory tree in memory.

@@ -351,8 +351,7 @@ struct GroupingCandidates {
 async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<GroupingCandidates> {
     let index = incident_index(dir).await.ok();
     if let Some(index) = &index
-        && let Ok(paths) = index.paths_for_group(group_key).await
-        && !paths.is_empty()
+        && let Ok(paths) = index.paths_for_group_or_legacy(group_key).await
     {
         return Ok(GroupingCandidates {
             incidents: load_incidents(dir, paths).await?,
