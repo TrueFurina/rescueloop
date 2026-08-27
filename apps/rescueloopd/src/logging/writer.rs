@@ -1,6 +1,8 @@
 use anyhow::{Context, Result};
 use chrono::{Local, NaiveDate};
 use flate2::{Compression, write::GzEncoder};
+use fs2::FileExt;
+use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
@@ -9,7 +11,7 @@ use std::{
         Arc, Mutex, MutexGuard,
         atomic::{AtomicU64, Ordering},
     },
-    time::{Duration, SystemTime},
+    time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
@@ -53,16 +55,30 @@ struct State {
     date: NaiveDate,
     bytes_written: u64,
     sequence: u32,
+    _run_lock: File,
+    record_sequence: u64,
+    previous_hash: String,
+    started_at: Instant,
 }
 
 impl RollingWriter {
     pub fn new(config: WriterConfig) -> Result<Self> {
+        uuid::Uuid::parse_str(&config.run_id).context("log run_id must be a UUID")?;
         fs::create_dir_all(&config.directory)?;
-        prune_expired(&config.directory, config.retention_days)?;
-        compress_inactive(&config.directory)?;
+        maintain_inactive(&config.directory, config.retention_days)?;
+        let lock_path = run_lock_path(&config.directory, &config.run_id);
+        let run_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)?;
+        run_lock
+            .try_lock_exclusive()
+            .with_context(|| format!("log run is already active: {}", config.run_id))?;
         let date = Local::now().date_naive();
-        let sequence = next_sequence(&config.directory, date);
-        let path = log_path(&config.directory, date, sequence);
+        let sequence = 0;
+        let path = log_path(&config.directory, &config.run_id, date, sequence);
         let file = open(&path)?;
         let bytes_written = file.metadata()?.len();
         Ok(Self {
@@ -73,6 +89,10 @@ impl RollingWriter {
                 date,
                 bytes_written,
                 sequence,
+                _run_lock: run_lock,
+                record_sequence: 0,
+                previous_hash: String::new(),
+                started_at: Instant::now(),
             }),
             health: LogHealth {
                 write_errors: Arc::new(AtomicU64::new(0)),
@@ -136,8 +156,16 @@ impl EventWriter<'_> {
             .state
             .as_mut()
             .ok_or_else(|| io::Error::other("log writer state is unavailable"))?;
-        let encoded = enrich_and_redact(&self.buffer, &state.config.run_id)?;
+        let (encoded, hash) = enrich_and_redact(
+            &self.buffer,
+            &state.config.run_id,
+            state.record_sequence,
+            &state.previous_hash,
+            state.started_at.elapsed().as_nanos(),
+        )?;
         state.write(&encoded, self.health)?;
+        state.previous_hash = hash;
+        state.record_sequence = state.record_sequence.saturating_add(1);
         self.committed = true;
         Ok(())
     }
@@ -183,14 +211,19 @@ impl State {
         self.sequence = if date == self.date {
             self.sequence.saturating_add(1)
         } else {
-            next_sequence(&self.config.directory, date)
+            0
         };
         self.date = date;
-        self.path = log_path(&self.config.directory, date, self.sequence);
+        self.path = log_path(
+            &self.config.directory,
+            &self.config.run_id,
+            date,
+            self.sequence,
+        );
         let file = open(&self.path)?;
         self.bytes_written = file.metadata()?.len();
         self.file = Some(file);
-        prune_expired(&self.config.directory, self.config.retention_days)
+        maintain_inactive(&self.config.directory, self.config.retention_days)
             .map_err(io::Error::other)?;
         Ok(())
     }
@@ -200,40 +233,52 @@ fn open(path: &Path) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
-fn log_path(directory: &Path, date: NaiveDate, sequence: u32) -> PathBuf {
+fn log_path(directory: &Path, run_id: &str, date: NaiveDate, sequence: u32) -> PathBuf {
     directory.join(format!(
-        "{LOG_PREFIX}{}-{sequence:04}.jsonl",
-        date.format("%Y-%m-%d")
+        "{LOG_PREFIX}{}-{run_id}-{sequence:04}.jsonl",
+        date.format("%Y-%m-%d"),
     ))
 }
 
-fn next_sequence(directory: &Path, date: NaiveDate) -> u32 {
-    let date = date.format("%Y-%m-%d").to_string();
-    fs::read_dir(directory)
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok())
-        .filter_map(|entry| sequence_from_name(&entry.file_name().to_string_lossy(), &date))
-        .max()
-        .map_or(0, |value| value.saturating_add(1))
+fn run_lock_path(directory: &Path, run_id: &str) -> PathBuf {
+    directory.join(format!("{LOG_PREFIX}{run_id}.lock"))
 }
 
-fn sequence_from_name(name: &str, date: &str) -> Option<u32> {
-    name.strip_prefix(&format!("{LOG_PREFIX}{date}-"))?
-        .split('.')
-        .next()?
-        .parse()
-        .ok()
+fn run_id_from_log_path(path: &Path) -> Option<&str> {
+    let name = path.file_name()?.to_str()?.strip_prefix(LOG_PREFIX)?;
+    let after_date = name.get(11..)?;
+    let run_id = after_date.get(..36)?;
+    uuid::Uuid::parse_str(run_id).ok().map(|_| run_id)
 }
 
-fn compress_inactive(directory: &Path) -> Result<()> {
+fn maintain_inactive(directory: &Path, retention_days: usize) -> Result<()> {
+    prune_expired(directory, retention_days)?;
     for entry in fs::read_dir(directory)? {
         let path = entry?.path();
-        if path.extension().is_some_and(|value| value == "jsonl") {
+        if path.extension().is_some_and(|value| value == "jsonl") && !is_active(&path)? {
             compress(&path)?;
         }
     }
     Ok(())
+}
+
+fn is_active(path: &Path) -> Result<bool> {
+    let Some(run_id) = run_id_from_log_path(path) else {
+        return Ok(false);
+    };
+    let lock_path = run_lock_path(path.parent().unwrap_or(Path::new(".")), run_id);
+    if !lock_path.exists() {
+        return Ok(false);
+    }
+    let lock = OpenOptions::new().read(true).write(true).open(lock_path)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {
+            FileExt::unlock(&lock)?;
+            Ok(false)
+        }
+        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn compress(path: &Path) -> io::Result<()> {
@@ -258,6 +303,15 @@ fn prune_expired(directory: &Path, retention_days: usize) -> Result<()> {
         if !name.to_string_lossy().starts_with(LOG_PREFIX) || !entry.file_type()?.is_file() {
             continue;
         }
+        if !matches!(
+            entry.path().extension().and_then(|value| value.to_str()),
+            Some("jsonl" | "gz")
+        ) {
+            continue;
+        }
+        if is_active(&entry.path())? {
+            continue;
+        }
         let modified = entry.metadata()?.modified()?;
         if now.duration_since(modified).is_ok_and(|age| age > max_age) {
             fs::remove_file(entry.path()).with_context(|| {
@@ -268,7 +322,13 @@ fn prune_expired(directory: &Path, retention_days: usize) -> Result<()> {
     Ok(())
 }
 
-fn enrich_and_redact(buffer: &[u8], run_id: &str) -> io::Result<Vec<u8>> {
+fn enrich_and_redact(
+    buffer: &[u8],
+    run_id: &str,
+    sequence: u64,
+    previous_hash: &str,
+    monotonic_ns: u128,
+) -> io::Result<(Vec<u8>, String)> {
     let mut record: serde_json::Value = serde_json::from_slice(buffer)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
     redact(&mut record, None);
@@ -277,6 +337,9 @@ fn enrich_and_redact(buffer: &[u8], run_id: &str) -> io::Result<Vec<u8>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "log record is not an object"))?;
     object.insert("schema_version".into(), 1.into());
     object.insert("run_id".into(), run_id.into());
+    object.insert("sequence".into(), sequence.into());
+    object.insert("previous_hash".into(), previous_hash.into());
+    object.insert("monotonic_ns".into(), monotonic_ns.to_string().into());
     if let Some(fields) = object
         .get_mut("fields")
         .and_then(serde_json::Value::as_object_mut)
@@ -296,9 +359,15 @@ fn enrich_and_redact(buffer: &[u8], run_id: &str) -> io::Result<Vec<u8>> {
         .unwrap_or(run_id)
         .to_string();
     object.insert("correlation_id".into(), correlation.into());
+    let canonical = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    let hash = format!("{:x}", Sha256::digest(&canonical));
+    record
+        .as_object_mut()
+        .expect("record was validated as an object")
+        .insert("record_hash".into(), hash.clone().into());
     let mut encoded = serde_json::to_vec(&record).map_err(io::Error::other)?;
     encoded.push(b'\n');
-    Ok(encoded)
+    Ok((encoded, hash))
 }
 
 fn redact(value: &mut serde_json::Value, key: Option<&str>) {
@@ -362,18 +431,21 @@ mod tests {
         path
     }
 
-    #[test]
-    fn rotates_by_size_and_compresses_previous_file() {
-        let directory = temp_directory();
-        let writer = RollingWriter::new(WriterConfig {
-            directory: directory.clone(),
+    fn config(directory: &Path, run_id: Uuid) -> WriterConfig {
+        WriterConfig {
+            directory: directory.to_path_buf(),
             max_file_bytes: 1,
             retention_days: 14,
             compress_rotated: true,
-            run_id: "test-run".into(),
+            run_id: run_id.to_string(),
             export: None,
-        })
-        .unwrap();
+        }
+    }
+
+    #[test]
+    fn rotates_by_size_and_compresses_previous_file() {
+        let directory = temp_directory();
+        let writer = RollingWriter::new(config(&directory, Uuid::new_v4())).unwrap();
         writer
             .make_writer()
             .write_all(br#"{"fields":{"event":"first"}}"#)
@@ -409,9 +481,12 @@ mod tests {
 
     #[test]
     fn adds_context_and_redacts_sensitive_fields() {
-        let encoded = enrich_and_redact(
+        let (encoded, hash) = enrich_and_redact(
             br#"{"fields":{"event":"test","token":"secret","incident_id":"incident-1"}}"#,
             "run-1",
+            0,
+            "",
+            0,
         )
         .unwrap();
         let record: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
@@ -419,5 +494,36 @@ mod tests {
         assert_eq!(record["run_id"], "run-1");
         assert_eq!(record["correlation_id"], "incident-1");
         assert_eq!(record["fields"]["token"], "[REDACTED]");
+        assert_eq!(record["record_hash"], hash);
+    }
+
+    #[test]
+    fn does_not_compress_another_active_process_log() {
+        let directory = temp_directory();
+        let first = RollingWriter::new(config(&directory, Uuid::new_v4())).unwrap();
+        first
+            .make_writer()
+            .write_all(br#"{"fields":{"event":"first"}}"#)
+            .unwrap();
+
+        let second = RollingWriter::new(config(&directory, Uuid::new_v4())).unwrap();
+        second
+            .make_writer()
+            .write_all(br#"{"fields":{"event":"second"}}"#)
+            .unwrap();
+
+        let jsonl_count = fs::read_dir(&directory)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                entry
+                    .path()
+                    .extension()
+                    .is_some_and(|value| value == "jsonl")
+            })
+            .count();
+        assert_eq!(jsonl_count, 2);
+        drop((first, second));
+        fs::remove_dir_all(directory).unwrap();
     }
 }

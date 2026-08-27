@@ -73,6 +73,8 @@ enum Command {
         since: Option<String>,
         #[arg(long)]
         until: Option<String>,
+        #[arg(long)]
+        verify: bool,
         #[arg(long, value_enum, default_value_t = LogOutput::Pretty)]
         output: LogOutput,
     },
@@ -201,6 +203,7 @@ async fn run(cli: Cli) -> Result<()> {
             correlation_id,
             since,
             until,
+            verify,
             output,
         }) => {
             logging::query(
@@ -213,6 +216,7 @@ async fn run(cli: Cli) -> Result<()> {
                     correlation_id,
                     since,
                     until,
+                    verify,
                     output: match output {
                         LogOutput::Pretty => logging::LogOutput::Pretty,
                         LogOutput::Json => logging::LogOutput::Json,

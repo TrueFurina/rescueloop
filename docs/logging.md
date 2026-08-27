@@ -7,13 +7,15 @@ RescueLoop writes structured JSON Lines logs independently from terminal output.
 Logs are stored next to the state directories:
 
 ```text
-.rescueloop/logs/rescueloop-YYYY-MM-DD-NNNN.jsonl
+.rescueloop/logs/rescueloop-YYYY-MM-DD-RUN_ID-NNNN.jsonl
 ```
 
 Files rotate daily or after 10 MiB, whichever comes first. Rotated files are
 compressed with gzip. Files older than 14 days are removed. Set
 `RESCUELOOP_LOG_RETENTION_DAYS` to change retention and
 `RESCUELOOP_LOG_MAX_BYTES` to change the size threshold.
+Per-run file locks prevent CLI, TUI and watcher processes from rotating,
+compressing or deleting each other's active segments.
 
 Use the CLI to inspect the latest file:
 
@@ -24,6 +26,7 @@ rescueloop logs --follow --level warn
 rescueloop logs --event repair.rolled_back --output json
 rescueloop logs --correlation-id <incident-id>
 rescueloop logs --since 2026-08-27T10:00:00Z --until 2026-08-27T11:00:00Z
+rescueloop logs --verify --lines 0
 ```
 
 ## Levels
@@ -55,8 +58,9 @@ Unix-like systems.
 ## Event contract
 
 Every record contains `schema_version`, `run_id`, `correlation_id`, timestamp,
-level, target, message and stable `event` name. Lifecycle records add identifiers
-and outcomes where applicable.
+level, target, message, stable `event`, sequence and SHA-256 chain fields.
+`logs --verify` detects modified, deleted or reordered retained records.
+Per-run monotonic nanoseconds preserve ordering when the wall clock moves.
 
 Important event families:
 

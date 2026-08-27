@@ -2,8 +2,9 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use flate2::read::GzDecoder;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, VecDeque},
     fs::File,
     io::{BufRead, BufReader, Read, Seek, SeekFrom},
     path::{Path, PathBuf},
@@ -20,6 +21,7 @@ pub struct LogQuery {
     pub correlation_id: Option<String>,
     pub since: Option<String>,
     pub until: Option<String>,
+    pub verify: bool,
     pub output: LogOutput,
 }
 
@@ -40,16 +42,23 @@ pub async fn run(incident_dir: &Path, query: LogQuery) -> Result<()> {
     let directory = log_directory(incident_dir);
     let filters = Filters::from_query(&query)?;
     let files = log_files(&directory)?;
-    let mut recent = VecDeque::with_capacity(query.lines.min(10_000));
+    let mut all_records = Vec::new();
     for path in &files {
-        for record in read_records(path)? {
-            if filters.matches(&record) {
-                if recent.len() == query.lines {
-                    recent.pop_front();
-                }
-                if query.lines > 0 {
-                    recent.push_back(record);
-                }
+        all_records.extend(read_records(path)?);
+    }
+    all_records.sort_by_key(timestamp);
+    if query.verify {
+        let verified = verify_chains(&all_records)?;
+        eprintln!("Verified {verified} hash-chained log record(s). ");
+    }
+    let mut recent = VecDeque::with_capacity(query.lines.min(10_000));
+    for record in all_records {
+        if filters.matches(&record) {
+            if recent.len() == query.lines {
+                recent.pop_front();
+            }
+            if query.lines > 0 {
+                recent.push_back(record);
             }
         }
     }
@@ -219,6 +228,55 @@ fn print_record(record: &Value, output: &LogOutput) -> Result<()> {
     Ok(())
 }
 
+fn verify_chains(records: &[Value]) -> Result<usize> {
+    let mut runs: HashMap<&str, Vec<&Value>> = HashMap::new();
+    for record in records {
+        let run_id = record
+            .get("run_id")
+            .and_then(Value::as_str)
+            .context("log record has no run_id")?;
+        runs.entry(run_id).or_default().push(record);
+    }
+    let mut verified = 0;
+    for (run_id, mut records) in runs {
+        records.sort_by_key(|record| record.get("sequence").and_then(Value::as_u64));
+        let mut prior: Option<(u64, &str)> = None;
+        for record in records {
+            let sequence = record
+                .get("sequence")
+                .and_then(Value::as_u64)
+                .context("log record has no sequence")?;
+            let previous_hash = record
+                .get("previous_hash")
+                .and_then(Value::as_str)
+                .context("log record has no previous_hash")?;
+            let expected = record
+                .get("record_hash")
+                .and_then(Value::as_str)
+                .context("log record has no record_hash")?;
+            let mut canonical = record.clone();
+            canonical
+                .as_object_mut()
+                .context("log record is not an object")?
+                .remove("record_hash");
+            let actual = format!("{:x}", Sha256::digest(serde_json::to_vec(&canonical)?));
+            if actual != expected {
+                anyhow::bail!("log hash mismatch for run {run_id} sequence {sequence}")
+            }
+            if let Some((prior_sequence, prior_hash)) = prior {
+                if sequence != prior_sequence.saturating_add(1) || previous_hash != prior_hash {
+                    anyhow::bail!("broken log chain for run {run_id} sequence {sequence}")
+                }
+            } else if sequence == 0 && !previous_hash.is_empty() {
+                anyhow::bail!("invalid initial log hash for run {run_id}")
+            }
+            prior = Some((sequence, expected));
+            verified += 1;
+        }
+    }
+    Ok(verified)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -242,5 +300,17 @@ mod tests {
             until: parse_time(Some("2026-08-27T21:00:00Z"), "until").unwrap(),
         };
         assert!(filters.matches(&record()));
+    }
+
+    #[test]
+    fn rejects_tampered_hash_chain() {
+        let mut first = serde_json::json!({
+            "run_id": "run", "sequence": 0, "previous_hash": "", "fields": {"event": "a"}
+        });
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&first).unwrap()));
+        first["record_hash"] = hash.into();
+        assert_eq!(verify_chains(&[first.clone()]).unwrap(), 1);
+        first["fields"]["event"] = "tampered".into();
+        assert!(verify_chains(&[first]).is_err());
     }
 }

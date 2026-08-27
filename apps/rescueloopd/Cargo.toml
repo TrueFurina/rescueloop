@@ -10,6 +10,7 @@ clap.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
+fs2.workspace = true
 rescueloop-agent = { path = "../../crates/rescueloop-agent" }
 rescueloop-core = { path = "../../crates/rescueloop-core" }
 rescueloop-ledger = { path = "../../crates/rescueloop-ledger" }
@@ -20,6 +21,7 @@ ratatui.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
