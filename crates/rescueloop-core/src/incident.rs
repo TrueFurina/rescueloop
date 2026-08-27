@@ -114,6 +114,9 @@ pub struct Incident {
     pub first_observed_at: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_observed_at: Option<DateTime<Utc>>,
+    /// Local persistence checkpoint used to make crash recovery idempotent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_occurrence_id: Option<Uuid>,
 }
 
 fn default_occurrence_count() -> u64 {
@@ -159,6 +162,7 @@ impl Incident {
             occurrence_count: 1,
             first_observed_at: Some(observed_at),
             last_observed_at: Some(observed_at),
+            last_occurrence_id: None,
         }
     }
 

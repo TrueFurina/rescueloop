@@ -7,7 +7,7 @@ use std::{
 };
 use tokio::fs;
 
-use crate::storage;
+use crate::{observation_journal, storage};
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
     let paths = match incident_index(dir).await {
@@ -143,11 +143,11 @@ pub(crate) async fn incident_by_number(dir: &Path, number: &str) -> Result<Incid
 
 pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir).await?;
-    let (_, occurrence_created) = save_occurrence(dir, incident).await?;
     let _store_lock = acquire_store_lock(dir).await?;
+    recover_pending_locked(dir).await?;
     let group_key = incident_group_key(incident);
     let candidates = grouping_candidates(dir, &group_key).await?;
-    if !occurrence_created
+    if occurrence_path(dir, incident.id).exists()
         && let Some((_, path)) = candidates.iter().find(|(candidate, _)| {
             candidate.group_key == group_key || incident_group_key(candidate) == group_key
         })
@@ -157,6 +157,45 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
             incident_id = %incident.id,
             "Duplicate occurrence ignored"
         );
+        return Ok((path.clone(), false));
+    }
+    let journal = observation_journal::begin(dir, incident).await?;
+    let result = apply_observation(dir, incident).await?;
+    observation_journal::complete(&journal).await?;
+    Ok(result)
+}
+
+pub(crate) async fn recover_pending_observations(dir: &Path) -> Result<usize> {
+    fs::create_dir_all(dir).await?;
+    let _store_lock = acquire_store_lock(dir).await?;
+    recover_pending_locked(dir).await
+}
+
+async fn recover_pending_locked(dir: &Path) -> Result<usize> {
+    let pending = observation_journal::pending(dir).await?;
+    let count = pending.len();
+    for transaction in pending {
+        apply_observation(dir, &transaction.incident).await?;
+        observation_journal::complete(&transaction.path).await?;
+        tracing::warn!(
+            event = "observation.recovered",
+            incident_id = %transaction.incident.id,
+            "Recovered interrupted observation transaction"
+        );
+    }
+    Ok(count)
+}
+
+async fn apply_observation(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
+    save_occurrence(dir, incident).await?;
+    abort_after_occurrence_if_requested();
+    let group_key = incident_group_key(incident);
+    let candidates = grouping_candidates(dir, &group_key).await?;
+    if let Some((existing, path)) = candidates
+        .iter()
+        .find(|(candidate, _)| candidate.last_occurrence_id == Some(incident.id))
+    {
+        ensure_initial_lineage(dir, existing).await?;
         return Ok((path.clone(), false));
     }
     if let Some((mut existing, path)) = candidates.into_iter().find(|(candidate, _)| {
@@ -171,6 +210,7 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
         existing.occurrence_count = existing.occurrence_count.max(1) + 1;
         existing.first_observed_at = existing.first_observed_at.or(Some(existing.observed_at));
         existing.last_observed_at = Some(incident.observed_at);
+        existing.last_occurrence_id = Some(incident.id);
         existing.message = incident.message.clone();
         existing.kind = incident.kind.clone();
         existing.normalized_failure = incident.normalized_failure.clone();
@@ -198,6 +238,7 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     incident.occurrence_count = 1;
     incident.first_observed_at = Some(incident.observed_at);
     incident.last_observed_at = Some(incident.observed_at);
+    incident.last_occurrence_id = Some(incident.id);
     let destination = dir.join(format!("{}.json", incident.id));
     if !storage::create_durable(&destination, &serde_json::to_vec_pretty(&incident)?).await? {
         return Ok((destination, false));
@@ -214,8 +255,31 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     {
         tracing::warn!(%error, "incident JSON saved but disposable index update failed");
     }
+    ensure_initial_lineage(dir, &incident).await?;
+    Ok((destination, true))
+}
+
+#[cfg(debug_assertions)]
+fn abort_after_occurrence_if_requested() {
+    if std::env::var("RESCUELOOP_TEST_ABORT_AFTER_OCCURRENCE").as_deref() == Ok("1") {
+        std::process::abort();
+    }
+}
+
+#[cfg(not(debug_assertions))]
+fn abort_after_occurrence_if_requested() {}
+
+async fn ensure_initial_lineage(dir: &Path, incident: &Incident) -> Result<()> {
+    let ledger = ledger_path(dir);
+    if rescueloop_ledger::load(&ledger)
+        .await?
+        .iter()
+        .any(|entry| entry.incident_id == incident.id)
+    {
+        return Ok(());
+    }
     let entry = rescueloop_ledger::append(
-        &ledger_path(dir),
+        &ledger,
         rescueloop_ledger::NewLedgerEntry {
             incident: incident.clone(),
             repair: None,
@@ -234,7 +298,7 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
         "Incident lineage appended"
     );
     println!("LINEAGE: {:?}", entry.relation);
-    Ok((destination, true))
+    Ok(())
 }
 
 struct StoreLock(File);
@@ -276,22 +340,31 @@ async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<Vec<(Inciden
     incidents(dir).await
 }
 
-async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
-    let state_root = incident_dir.parent().unwrap_or(incident_dir);
-    let directory = state_root.join("occurrences");
+fn occurrence_path(incident_dir: &Path, incident_id: uuid::Uuid) -> PathBuf {
+    incident_dir
+        .parent()
+        .unwrap_or(incident_dir)
+        .join("occurrences")
+        .join(format!("{incident_id}.json"))
+}
+
+async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<PathBuf> {
+    let destination = occurrence_path(incident_dir, incident.id);
+    let directory = destination
+        .parent()
+        .context("occurrence path has no parent")?;
     fs::create_dir_all(&directory).await?;
-    let destination = directory.join(format!("{}.json", incident.id));
     let created =
         storage::create_durable(&destination, &serde_json::to_vec_pretty(incident)?).await?;
     if !created {
-        return Ok((destination, false));
+        return Ok(destination);
     }
     tracing::debug!(
         event = "occurrence.created",
         incident_id = %incident.id,
         "Immutable occurrence created"
     );
-    Ok((destination, true))
+    Ok(destination)
 }
 
 fn incident_group_key(incident: &Incident) -> String {
@@ -442,6 +515,57 @@ mod tests {
         let stored = incidents(&directory).await.unwrap();
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].0.occurrence_count, 1);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovers_journal_before_occurrence_publication() {
+        let root = std::env::temp_dir().join(format!("rescueloop-store-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("incidents");
+        let occurrence = fixture("api", "oom");
+        observation_journal::begin(&directory, &occurrence)
+            .await
+            .unwrap();
+
+        assert_eq!(recover_pending_observations(&directory).await.unwrap(), 1);
+        assert_eq!(recover_pending_observations(&directory).await.unwrap(), 0);
+        let stored = incidents(&directory).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0.last_occurrence_id, Some(occurrence.id));
+        assert!(occurrence_path(&directory, occurrence.id).exists());
+        assert_eq!(
+            rescueloop_ledger::load(&ledger_path(&directory))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn recovery_does_not_reapply_a_persisted_projection() {
+        let root = std::env::temp_dir().join(format!("rescueloop-store-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("incidents");
+        let occurrence = fixture("api", "oom");
+        observation_journal::begin(&directory, &occurrence)
+            .await
+            .unwrap();
+        {
+            let _lock = acquire_store_lock(&directory).await.unwrap();
+            apply_observation(&directory, &occurrence).await.unwrap();
+        }
+
+        assert_eq!(recover_pending_observations(&directory).await.unwrap(), 1);
+        let stored = incidents(&directory).await.unwrap();
+        assert_eq!(stored[0].0.occurrence_count, 1);
+        assert_eq!(
+            rescueloop_ledger::load(&ledger_path(&directory))
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
         fs::remove_dir_all(root).await.unwrap();
     }
 }

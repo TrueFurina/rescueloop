@@ -27,6 +27,9 @@ jobs:
       - name: Unix logging E2E
         if: runner.os != 'Windows'
         run: ./scripts/validate-logging.sh
+      - name: Observation crash recovery E2E
+        if: runner.os != 'Windows'
+        run: ./scripts/validate-observation-recovery.sh
       - name: MCP protocol compatibility
         if: runner.os != 'Windows'
         run: ./scripts/validate-mcp.sh

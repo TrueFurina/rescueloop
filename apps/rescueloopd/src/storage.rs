@@ -73,6 +73,19 @@ pub async fn replace_durable(path: &Path, bytes: &[u8]) -> Result<()> {
     tokio::task::spawn_blocking(move || replace_durable_sync(&path, &bytes)).await?
 }
 
+pub async fn remove_durable(path: &Path) -> Result<()> {
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || {
+        match fs::remove_file(&path) {
+            Ok(()) => sync_parent(&path)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        Ok(())
+    })
+    .await?
+}
+
 fn write_temporary(path: &Path, bytes: &[u8]) -> Result<(PathBuf, File)> {
     let parent = path.parent().context("durable file path has no parent")?;
     fs::create_dir_all(parent)?;

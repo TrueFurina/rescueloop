@@ -24,6 +24,11 @@ evidence updates.
 Occurrence creation is idempotent by UUID. Re-delivery of the same native event returns the existing
 projection without incrementing its count or duplicating evidence.
 
+Before an occurrence is published, RescueLoop durably writes an `observation-journal` transaction.
+Grouped projections record the last applied occurrence UUID. On watcher startup—and before any new
+ingestion—pending transactions are replayed under the store lock, missing lineage is restored, and
+already-applied projections are recognized without double counting.
+
 ## Disposable index
 
 `index-v1.db` contains only incident projections: identity, path, timestamps, grouping, application,

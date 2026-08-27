@@ -5,13 +5,24 @@ use tokio::{sync::mpsc, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 
-use crate::{console::load_settings, incident_store::save_incident, watch_health::WatchHealth};
+use crate::{
+    console::load_settings,
+    incident_store::{recover_pending_observations, save_incident},
+    watch_health::WatchHealth,
+};
 
 const EVENT_QUEUE_CAPACITY: usize = 256;
 const SHUTDOWN_DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
 
 pub async fn run(directory: &Path) -> Result<()> {
     tokio::fs::create_dir_all(directory).await?;
+    let recovered = recover_pending_observations(directory).await?;
+    if recovered > 0 {
+        info!(
+            event = "watch.recovery_completed",
+            recovered, "Interrupted observation transactions recovered"
+        );
+    }
     let settings = load_settings(directory).await?;
     let sources = rescueloop_platform::event_sources(&settings.enabled_sources)?;
     let source_names = sources

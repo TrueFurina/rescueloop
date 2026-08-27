@@ -10,6 +10,7 @@ mod console;
 mod incident_store;
 mod logging;
 mod mcp;
+mod observation_journal;
 mod repair_flow;
 mod service;
 mod storage;
