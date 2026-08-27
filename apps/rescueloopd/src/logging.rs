@@ -23,14 +23,14 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("cannot create log directory: {}", directory.display()))?;
     let retention_days = retention_days();
-    let export = export::configure()?;
+    let export = export::configure(&directory)?;
     let config = WriterConfig {
         directory: directory.clone(),
         max_file_bytes: max_file_bytes(),
         retention_days,
         compress_rotated: true,
         run_id: uuid::Uuid::new_v4().to_string(),
-        export: export.as_ref().map(|value| value.sender.clone()),
+        export: export.as_ref().map(|value| value.sink.clone()),
     };
     let appender = RollingWriter::new(config)?;
     let health = appender.health();

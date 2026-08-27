@@ -13,8 +13,9 @@ use std::{
     },
     time::{Duration, Instant, SystemTime},
 };
-use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
+
+use super::export::ExportSink;
 
 const LOG_PREFIX: &str = "rescueloop-";
 
@@ -24,7 +25,7 @@ pub struct WriterConfig {
     pub retention_days: usize,
     pub compress_rotated: bool,
     pub run_id: String,
-    pub export: Option<mpsc::Sender<Vec<u8>>>,
+    pub export: Option<ExportSink>,
 }
 
 #[derive(Clone)]
@@ -187,9 +188,13 @@ impl State {
             .write_all(buffer)?;
         self.bytes_written = self.bytes_written.saturating_add(buffer.len() as u64);
         if let Some(export) = &self.config.export
-            && export.try_send(buffer.to_vec()).is_err()
+            && let Err(error) = export.enqueue(buffer)
         {
             health.export_drops.fetch_add(1, Ordering::Relaxed);
+            let _ = writeln!(
+                io::stderr(),
+                "RescueLoop export spool write failed: {error}"
+            );
         }
         Ok(buffer.len())
     }

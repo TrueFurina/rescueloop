@@ -48,8 +48,9 @@ RESCUELOOP_OTLP_ENDPOINT=https://collector.example/v1/logs rescueloop watch
 ```
 
 Optional headers use comma-separated `name=value` pairs in
-`RESCUELOOP_OTLP_HEADERS`. Header values are never logged. Export is bounded and
-best-effort; network failures do not block or remove local records.
+`RESCUELOOP_OTLP_HEADERS`. Header values are never logged. Records are committed
+to a bounded disk spool before export. Failed batches retry with exponential
+backoff; network failures do not block or remove local logs.
 
 Native CI validates structured startup, restart, failure and panic records plus
 querying on macOS and Windows. Run `scripts/validate-logging.sh` locally on
