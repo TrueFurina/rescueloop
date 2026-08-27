@@ -1,6 +1,10 @@
 use anyhow::{Context, Result};
+use fs2::FileExt;
 use rescueloop_core::Incident;
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{File, OpenOptions},
+    path::{Path, PathBuf},
+};
 use tokio::fs;
 
 use crate::storage;
@@ -140,6 +144,7 @@ pub(crate) async fn incident_by_number(dir: &Path, number: &str) -> Result<Incid
 pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir).await?;
     save_occurrence(dir, incident).await?;
+    let _store_lock = acquire_store_lock(dir).await?;
     let group_key = incident_group_key(incident);
     let candidates = grouping_candidates(dir, &group_key).await?;
     if let Some((mut existing, path)) = candidates.into_iter().find(|(candidate, _)| {
@@ -218,6 +223,33 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     );
     println!("LINEAGE: {:?}", entry.relation);
     Ok((destination, true))
+}
+
+struct StoreLock(File);
+
+async fn acquire_store_lock(incident_dir: &Path) -> Result<StoreLock> {
+    let path = incident_dir
+        .parent()
+        .unwrap_or(incident_dir)
+        .join(".incident-store.lock");
+    tokio::task::spawn_blocking(move || {
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&path)?;
+        file.lock_exclusive()
+            .with_context(|| format!("cannot lock incident store: {}", path.display()))?;
+        Ok(StoreLock(file))
+    })
+    .await?
+}
+
+impl Drop for StoreLock {
+    fn drop(&mut self) {
+        let _ = FileExt::unlock(&self.0);
+    }
 }
 
 async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<Vec<(Incident, PathBuf)>> {
@@ -353,6 +385,32 @@ mod tests {
         let grouped: Incident =
             serde_json::from_slice(&fs::read(first_path).await.unwrap()).unwrap();
         assert_eq!(grouped.occurrence_count, 2);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_grouping_preserves_every_occurrence() {
+        let root = std::env::temp_dir().join(format!("rescueloop-store-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("incidents");
+        let tasks = (0..16)
+            .map(|_| {
+                let directory = directory.clone();
+                tokio::spawn(async move { save_incident(&directory, &fixture("api", "oom")).await })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+
+        let stored = incidents(&directory).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0.occurrence_count, 16);
+        let mut occurrences = fs::read_dir(root.join("occurrences")).await.unwrap();
+        let mut occurrence_count = 0;
+        while occurrences.next_entry().await.unwrap().is_some() {
+            occurrence_count += 1;
+        }
+        assert_eq!(occurrence_count, 16);
         fs::remove_dir_all(root).await.unwrap();
     }
 }

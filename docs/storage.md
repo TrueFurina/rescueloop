@@ -18,6 +18,9 @@ the original evidence remains recoverable from occurrence documents.
 Both paths use a same-directory synced temporary file. Immutable occurrences are published with an
 atomic no-clobber link; grouped projections use an atomic replace and directory sync on Unix. Windows
 replacement uses `MoveFileExW` with replace and write-through flags.
+Grouping, projection replacement, index update and initial lineage append are serialized by a
+cross-process incident-store lock. Concurrent collectors therefore cannot lose occurrence-count or
+evidence updates.
 
 ## Disposable index
 
