@@ -53,3 +53,8 @@ a substitute for the release benchmark.
 On macOS arm64, the optimized multi-source watcher with DiagnosticReports enabled and Docker
 installed but offline measured `0.0%` CPU in 10/10 one-second samples, approximately 9.3 MiB RSS,
 and zero child processes. Docker socket discovery was event-driven during this measurement.
+
+On 2026-08-28, the production release build after bounded queues and graceful lifecycle changes
+measured `0.007%` average CPU, `0.100%` maximum sampled CPU, 10.33 MiB average RSS and 10.34 MiB
+peak RSS over a 30-sample macOS arm64 smoke benchmark. This proves comfortable short-run margin;
+the required 1,800-second release gate and scheduled 24-hour soak remain authoritative.
