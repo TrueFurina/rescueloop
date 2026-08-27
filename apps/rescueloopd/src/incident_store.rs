@@ -163,19 +163,19 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     fs::create_dir_all(dir).await?;
     let _store_lock = acquire_store_lock(dir).await?;
     recover_pending_locked(dir).await?;
-    let group_key = incident_group_key(incident);
-    let candidates = grouping_candidates(dir, &group_key).await?;
-    if occurrence_path(dir, incident.id).exists()
-        && let Some((_, path)) = candidates.iter().find(|(candidate, _)| {
+    if occurrence_path(dir, incident.id).exists() {
+        let group_key = incident_group_key(incident);
+        let grouping = grouping_candidates(dir, &group_key).await?;
+        if let Some((_, path)) = grouping.incidents.iter().find(|(candidate, _)| {
             candidate.group_key == group_key || incident_group_key(candidate) == group_key
-        })
-    {
-        tracing::debug!(
-            event = "occurrence.duplicate",
-            incident_id = %incident.id,
-            "Duplicate occurrence ignored"
-        );
-        return Ok((path.clone(), false));
+        }) {
+            tracing::debug!(
+                event = "occurrence.duplicate",
+                incident_id = %incident.id,
+                "Duplicate occurrence ignored"
+            );
+            return Ok((path.clone(), false));
+        }
     }
     let journal = observation_journal::begin(dir, incident).await?;
     let result = apply_observation(dir, incident).await?;
@@ -208,7 +208,8 @@ async fn apply_observation(dir: &Path, incident: &Incident) -> Result<(PathBuf, 
     save_occurrence(dir, incident).await?;
     abort_after_occurrence_if_requested();
     let group_key = incident_group_key(incident);
-    let candidates = grouping_candidates(dir, &group_key).await?;
+    let grouping = grouping_candidates(dir, &group_key).await?;
+    let candidates = grouping.incidents;
     if let Some((existing, path)) = candidates
         .iter()
         .find(|(candidate, _)| candidate.last_occurrence_id == Some(incident.id))
@@ -244,7 +245,7 @@ async fn apply_observation(dir: &Path, incident: &Incident) -> Result<(PathBuf, 
             evidence_count = existing.evidence.len(),
             "Active incident updated"
         );
-        if let Ok(index) = incident_index(dir).await
+        if let Some(index) = grouping.index
             && let Err(error) = index.upsert(&existing, &path).await
         {
             tracing::warn!(%error, "incident JSON saved but disposable index update failed");
@@ -268,7 +269,7 @@ async fn apply_observation(dir: &Path, incident: &Incident) -> Result<(PathBuf, 
         evidence_count = incident.evidence.len(),
         "Incident JSON created"
     );
-    if let Ok(index) = incident_index(dir).await
+    if let Some(index) = grouping.index
         && let Err(error) = index.upsert(&incident, &destination).await
     {
         tracing::warn!(%error, "incident JSON saved but disposable index update failed");
@@ -342,16 +343,28 @@ impl Drop for StoreLock {
     }
 }
 
-async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<Vec<(Incident, PathBuf)>> {
-    if let Ok(index) = incident_index(dir).await
+struct GroupingCandidates {
+    incidents: Vec<(Incident, PathBuf)>,
+    index: Option<rescueloop_index::IncidentIndex>,
+}
+
+async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<GroupingCandidates> {
+    let index = incident_index(dir).await.ok();
+    if let Some(index) = &index
         && let Ok(paths) = index.paths_for_group(group_key).await
         && !paths.is_empty()
     {
-        return load_incidents(dir, paths).await;
+        return Ok(GroupingCandidates {
+            incidents: load_incidents(dir, paths).await?,
+            index: Some(index.clone()),
+        });
     }
     // Older documents may predate persisted group keys. A one-time full scan
     // preserves compatibility; the first match is upgraded by save_incident.
-    incidents(dir).await
+    Ok(GroupingCandidates {
+        incidents: load_incidents(dir, incident_json_paths(dir).await?).await?,
+        index,
+    })
 }
 
 fn occurrence_path(incident_dir: &Path, incident_id: uuid::Uuid) -> PathBuf {
