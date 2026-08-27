@@ -15,7 +15,7 @@ use std::{
 };
 use tracing_subscriber::fmt::MakeWriter;
 
-use super::export::ExportSink;
+use super::{export::ExportSink, fallback};
 
 const LOG_PREFIX: &str = "rescueloop-";
 
@@ -143,7 +143,7 @@ impl Drop for EventWriter<'_> {
     fn drop(&mut self) {
         if let Err(error) = self.commit() {
             self.health.write_errors.fetch_add(1, Ordering::Relaxed);
-            let _ = writeln!(io::stderr(), "RescueLoop log write failed: {error}");
+            fallback::emergency(&format!("RescueLoop log write failed: {error}"));
         }
     }
 }
@@ -191,10 +191,7 @@ impl State {
             && let Err(error) = export.enqueue(buffer)
         {
             health.export_drops.fetch_add(1, Ordering::Relaxed);
-            let _ = writeln!(
-                io::stderr(),
-                "RescueLoop export spool write failed: {error}"
-            );
+            fallback::emergency(&format!("RescueLoop export spool write failed: {error}"));
         }
         Ok(buffer.len())
     }
@@ -262,6 +259,29 @@ fn maintain_inactive(directory: &Path, retention_days: usize) -> Result<()> {
         let path = entry?.path();
         if path.extension().is_some_and(|value| value == "jsonl") && !is_active(&path)? {
             compress(&path)?;
+        }
+    }
+    remove_inactive_locks(directory)?;
+    Ok(())
+}
+
+fn remove_inactive_locks(directory: &Path) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let path = entry?.path();
+        if path.extension().is_none_or(|value| value != "lock") {
+            continue;
+        }
+        let lock = OpenOptions::new().read(true).write(true).open(&path)?;
+        match lock.try_lock_exclusive() {
+            Ok(()) => {
+                FileExt::unlock(&lock)?;
+                drop(lock);
+                fs::remove_file(&path).with_context(|| {
+                    format!("cannot remove inactive log lock: {}", path.display())
+                })?;
+            }
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(())
@@ -529,6 +549,55 @@ mod tests {
             .count();
         assert_eq!(jsonl_count, 2);
         drop((first, second));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn concurrent_writers_preserve_every_record() {
+        let directory = temp_directory();
+        let handles = (0..4)
+            .map(|worker| {
+                let directory = directory.clone();
+                std::thread::spawn(move || {
+                    let mut config = config(&directory, Uuid::new_v4());
+                    config.max_file_bytes = 1024 * 1024;
+                    let writer = RollingWriter::new(config).unwrap();
+                    for sequence in 0..100 {
+                        writer
+                            .make_writer()
+                            .write_all(
+                                format!(
+                                    r#"{{"fields":{{"event":"stress","worker":{worker},"item":{sequence}}}}}"#
+                                )
+                                .as_bytes(),
+                            )
+                            .unwrap();
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        for handle in handles {
+            handle.join().unwrap();
+        }
+        maintain_inactive(&directory, 14).unwrap();
+
+        let mut records = 0;
+        for entry in fs::read_dir(&directory).unwrap().flatten() {
+            if entry.path().extension().is_some_and(|value| value == "gz") {
+                let mut decoded = String::new();
+                flate2::read::GzDecoder::new(File::open(entry.path()).unwrap())
+                    .read_to_string(&mut decoded)
+                    .unwrap();
+                records += decoded.lines().count();
+            }
+        }
+        assert_eq!(records, 400);
+        assert!(!fs::read_dir(&directory).unwrap().flatten().any(|entry| {
+            entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "lock")
+        }));
         fs::remove_dir_all(directory).unwrap();
     }
 }

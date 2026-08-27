@@ -26,6 +26,12 @@ try {
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents sources list 2>$null
     Remove-Item Env:RESCUELOOP_TEST_PANIC
     if ($LASTEXITCODE -eq 0) { throw "expected debug panic" }
+    $Binary = Join-Path (Get-Location) "target/debug/rescueloop.exe"
+    $Parallel = 1..8 | ForEach-Object {
+        Start-Process -FilePath $Binary -ArgumentList @("--incident-dir", $Incidents, "sources", "list") -PassThru -WindowStyle Hidden
+    }
+    $Parallel | Wait-Process
+    if ($Parallel | Where-Object { $_.ExitCode -ne 0 }) { throw "parallel logging process failed" }
     $LogRecords = @(& cargo run --quiet -p rescueloop -- --incident-dir $Incidents logs --lines 1000 --output json | ForEach-Object { $_ | ConvertFrom-Json })
     if (-not ($LogRecords | Where-Object { $_.fields.event -eq "runtime.panic" })) {
         throw "runtime.panic log event not found"
@@ -33,6 +39,8 @@ try {
     if (@($LogRecords.run_id | Sort-Object -Unique).Count -lt 3) {
         throw "expected distinct run IDs across process restarts"
     }
+    & cargo run --quiet -p rescueloop -- --incident-dir $Incidents logs --verify --lines 0
+    if ($LASTEXITCODE -ne 0) { throw "log integrity verification failed" }
     & cargo run --quiet -p rescueloop -- service status
     if ($LASTEXITCODE -ne 0) { throw "service status failed" }
     Write-Host "Windows native E2E passed."

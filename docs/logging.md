@@ -15,7 +15,9 @@ compressed with gzip. Files older than 14 days are removed. Set
 `RESCUELOOP_LOG_RETENTION_DAYS` to change retention and
 `RESCUELOOP_LOG_MAX_BYTES` to change the size threshold.
 Per-run file locks prevent CLI, TUI and watcher processes from rotating,
-compressing or deleting each other's active segments.
+compressing or deleting each other's active segments. Inactive lock files are
+removed automatically. If structured disk writes fail, RescueLoop also emits a
+minimal emergency message to stderr and the native Unix system log.
 
 Use the CLI to inspect the latest file:
 

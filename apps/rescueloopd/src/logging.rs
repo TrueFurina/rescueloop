@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 mod export;
+mod fallback;
 mod query;
 mod writer;
 
@@ -105,6 +106,7 @@ fn max_file_bytes() -> u64 {
 fn install_panic_hook() {
     let previous = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic| {
+        fallback::emergency(&format!("RescueLoop panic: {panic}"));
         tracing::error!(
             event = "runtime.panic",
             panic = %panic,
