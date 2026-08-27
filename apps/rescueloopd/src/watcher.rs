@@ -274,8 +274,11 @@ async fn shutdown_signal() -> Result<()> {
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use rescueloop_core::{Evidence, IncidentKind};
+    use std::collections::BTreeMap;
 
     struct PendingSource;
+    struct BurstSource;
 
     #[async_trait]
     impl IncidentCollector for PendingSource {
@@ -285,6 +288,27 @@ mod tests {
 
         async fn next_incident(&mut self) -> Result<Incident> {
             std::future::pending().await
+        }
+    }
+
+    #[async_trait]
+    impl IncidentCollector for BurstSource {
+        fn name(&self) -> &str {
+            "burst-test"
+        }
+
+        async fn next_incident(&mut self) -> Result<Incident> {
+            Ok(Incident::detected(
+                "test",
+                IncidentKind::Crash,
+                "failure",
+                Evidence {
+                    source: "test".into(),
+                    summary: "failure".into(),
+                    artifact: None,
+                    fields: BTreeMap::new(),
+                },
+            ))
         }
     }
 
@@ -304,6 +328,32 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), task)
             .await
             .expect("source task did not stop")
+            .unwrap();
+        assert_eq!(health.snapshot().active_sources, 0);
+    }
+
+    #[tokio::test]
+    async fn cancellation_releases_source_blocked_by_backpressure() {
+        let (sender, _events) = mpsc::channel(1);
+        let health = Arc::new(WatchHealth::default());
+        let cancellation = CancellationToken::new();
+        let task = tokio::spawn(run_source(
+            Box::new(BurstSource),
+            sender,
+            Arc::clone(&health),
+            cancellation.clone(),
+        ));
+        for _ in 0..20 {
+            if health.snapshot().queue_depth == 1 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(health.snapshot().queue_depth, 1);
+        cancellation.cancel();
+        tokio::time::timeout(Duration::from_secs(1), task)
+            .await
+            .expect("backpressured source did not stop")
             .unwrap();
         assert_eq!(health.snapshot().active_sources, 0);
     }
