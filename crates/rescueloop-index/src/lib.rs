@@ -13,6 +13,7 @@ pub struct IncidentIndex {
 }
 
 impl IncidentIndex {
+    #[tracing::instrument(name = "index.open", skip_all, err)]
     pub async fn open(state_root: &Path, incident_dir: &Path) -> Result<Self> {
         let index = Self {
             path: state_root.join(INDEX_FILENAME),
@@ -28,6 +29,7 @@ impl IncidentIndex {
         &self.path
     }
 
+    #[tracing::instrument(name = "index.upsert", skip(self, incident), fields(incident_id = %incident.id), err)]
     pub async fn upsert(&self, incident: &Incident, json_path: &Path) -> Result<()> {
         let path = self.path.clone();
         let incident_dir = self.incident_dir.clone();
@@ -60,6 +62,7 @@ impl IncidentIndex {
         .await?
     }
 
+    #[tracing::instrument(name = "index.rebuild", skip(self), err)]
     pub async fn rebuild(&self) -> Result<usize> {
         let path = self.path.clone();
         let incident_dir = self.incident_dir.clone();

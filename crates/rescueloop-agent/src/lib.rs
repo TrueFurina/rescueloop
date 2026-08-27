@@ -114,6 +114,12 @@ impl AnalysisProvider for CliAnalysisProvider {
         }
     }
 
+    #[tracing::instrument(
+        name = "analysis.cli",
+        skip(self, request),
+        fields(provider = self.name(), incident_id = %request.incident.id),
+        err
+    )]
     async fn analyze(&self, request: &AnalysisRequest) -> Result<AnalysisResponse, AnalysisError> {
         let prompt = analysis_prompt(request).map_err(|e| AnalysisError::Invalid(e.to_string()))?;
         let mut command = Command::new(&self.config.executable);
@@ -209,6 +215,12 @@ impl AnalysisProvider for HttpAnalysisProvider {
         "http-json"
     }
 
+    #[tracing::instrument(
+        name = "analysis.http",
+        skip(self, request),
+        fields(provider = self.name(), incident_id = %request.incident.id),
+        err
+    )]
     async fn analyze(&self, request: &AnalysisRequest) -> Result<AnalysisResponse, AnalysisError> {
         let mut call = self.client.post(&self.endpoint).json(request);
         if let Some(token) = &self.bearer_token {

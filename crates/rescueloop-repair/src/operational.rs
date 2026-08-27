@@ -51,6 +51,7 @@ pub fn compile_operational(proposal: &ProposedAction) -> Result<Option<Operation
     Ok(Some(action))
 }
 
+#[tracing::instrument(name = "repair.operational", skip(action, allowed_id), err)]
 pub async fn execute_operational(
     action: OperationalAction,
     allowed_id: &str,

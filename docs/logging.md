@@ -45,7 +45,7 @@ Important event families:
 
 - `runtime.*`: startup, clean shutdown, failure and panic;
 - `logging.*`: logger initialization;
-- `watch.*` and `source.*`: heartbeat, source failure and recovery;
+- `watch.*` and `source.*`: heartbeat, queue depth, counters, source failure and recovery;
 - `observation.*` and `incident.*`: detection, grouping and persistence;
 - `analysis.*`: analysis lifecycle without prompts or tokens;
 - `repair.*`: dry-run, apply, verification and rollback;

@@ -29,6 +29,7 @@ pub struct Transaction {
     pub original_mode: Option<u32>,
 }
 
+#[tracing::instrument(name = "repair.prepare", skip(plan, policy, transaction_root), err)]
 pub async fn prepare(
     plan: &RepairPlan,
     policy: &ScopePolicy,
@@ -59,6 +60,7 @@ pub async fn prepare(
     })
 }
 
+#[tracing::instrument(name = "repair.apply", skip(transaction), fields(transaction_id = %transaction.id), err)]
 pub async fn apply(transaction: &mut Transaction) -> Result<()> {
     if transaction.state != TransactionState::Prepared {
         bail!("transaction is not prepared")
@@ -111,6 +113,7 @@ pub async fn apply(transaction: &mut Transaction) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(name = "repair.rollback", skip(transaction), fields(transaction_id = %transaction.id), err)]
 pub async fn rollback(transaction: &mut Transaction) -> Result<()> {
     if transaction.state != TransactionState::Applied {
         bail!("only an applied transaction can be rolled back")
@@ -153,6 +156,7 @@ pub async fn rollback(transaction: &mut Transaction) -> Result<()> {
     Ok(())
 }
 
+#[tracing::instrument(name = "repair.finalize", skip(transaction), fields(transaction_id = %transaction.id, verification_passed), err)]
 pub async fn finalize(transaction: &mut Transaction, verification_passed: bool) -> Result<()> {
     if transaction.state != TransactionState::Applied {
         bail!("transaction is not applied")

@@ -3,6 +3,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rescueloop_agent::{ALLOWED_ACTIONS, HttpAnalysisProvider};
 use rescueloop_core::{AnalysisProvider, AnalysisRequest, Incident};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::fs;
 use tracing::{error, info};
@@ -13,6 +14,7 @@ mod logging;
 mod repair_flow;
 mod service;
 mod tui;
+mod watch_health;
 
 pub(crate) use console::configured_provider;
 use console::{console, index_command, load_settings, setup, sources};
@@ -20,6 +22,7 @@ pub(crate) use incident_store::local_timestamp;
 pub(crate) use incident_store::{dismiss_incident, record_incident_status};
 use incident_store::{incidents, save_incident};
 pub(crate) use repair_flow::{repair, repair_silent};
+use watch_health::WatchHealth;
 
 #[derive(Parser)]
 #[command(
@@ -299,22 +302,34 @@ async fn watch(dir: &Path) -> Result<()> {
     println!("Privacy: local detection only; AI analysis starts only on request");
     println!("Waiting for a new failure event...\n");
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let health = Arc::new(WatchHealth::default());
     let heartbeat_sources = source_names.len();
+    let heartbeat_health = Arc::clone(&health);
     let heartbeat = tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         interval.tick().await;
         loop {
             interval.tick().await;
+            let snapshot = heartbeat_health.snapshot();
             info!(
                 event = "watch.heartbeat",
                 source_count = heartbeat_sources,
+                active_sources = snapshot.active_sources,
+                degraded_sources = snapshot.degraded_sources,
+                retry_count = snapshot.retry_count,
+                received = snapshot.received,
+                persisted = snapshot.persisted,
+                grouped = snapshot.grouped,
+                queue_depth = snapshot.queue_depth,
                 "Watcher is alive"
             );
         }
     });
     for mut source in sources {
         let sender = sender.clone();
+        let health = Arc::clone(&health);
         tokio::spawn(async move {
+            health.source_started();
             info!(
                 event = "source.started",
                 source = source.name(),
@@ -332,6 +347,7 @@ async fn watch(dir: &Path) -> Result<()> {
                                 "Event source recovered"
                             );
                             degraded = false;
+                            health.source_recovered();
                         }
                         retry_delay = Duration::from_secs(2);
                         info!(
@@ -341,6 +357,7 @@ async fn watch(dir: &Path) -> Result<()> {
                             kind = ?incident.kind,
                             "Failure observation received"
                         );
+                        health.observation_received();
                         if sender.send(incident).is_err() {
                             info!(
                                 event = "source.stopped",
@@ -348,11 +365,17 @@ async fn watch(dir: &Path) -> Result<()> {
                                 reason = "receiver_closed",
                                 "Event source stopped"
                             );
+                            health.source_stopped(degraded);
                             break;
                         }
+                        health.queued();
                     }
                     Err(error) => {
+                        if !degraded {
+                            health.source_degraded();
+                        }
                         degraded = true;
+                        health.retrying();
                         tracing::warn!(
                             event = "source.retrying",
                             source = source.name(),
@@ -369,11 +392,14 @@ async fn watch(dir: &Path) -> Result<()> {
     }
     drop(sender);
     while let Some(incident) = events.recv().await {
+        health.dequeued();
         let (destination, created) = save_incident(dir, &incident).await?;
         if !created {
+            health.grouped();
             info!(event = "incident.grouped", incident_id = %incident.id, "Incident grouped with an active failure");
             continue;
         }
+        health.persisted();
         info!(
             event = "incident.persisted",
             incident_id = %incident.id,

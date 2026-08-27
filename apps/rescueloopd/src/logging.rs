@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
-use tracing_subscriber::EnvFilter;
+use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
 mod query;
 mod writer;
@@ -42,6 +42,7 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
         .json()
         .with_current_span(true)
         .with_span_list(true)
+        .with_span_events(FmtSpan::CLOSE)
         .with_ansi(false)
         .try_init()
         .map_err(|error| anyhow::anyhow!("cannot initialize operational logging: {error}"))?;

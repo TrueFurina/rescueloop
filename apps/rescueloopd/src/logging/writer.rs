@@ -265,6 +265,13 @@ fn enrich_and_redact(buffer: &[u8], run_id: &str) -> io::Result<Vec<u8>> {
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "log record is not an object"))?;
     object.insert("schema_version".into(), 1.into());
     object.insert("run_id".into(), run_id.into());
+    if let Some(fields) = object
+        .get_mut("fields")
+        .and_then(serde_json::Value::as_object_mut)
+        && !fields.contains_key("event")
+    {
+        fields.insert("event".into(), "span.closed".into());
+    }
     let correlation = object
         .get("fields")
         .and_then(serde_json::Value::as_object)

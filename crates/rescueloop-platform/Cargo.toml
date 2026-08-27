@@ -12,6 +12,7 @@ rescueloop-core = { path = "../rescueloop-core" }
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tracing.workspace = true
 uuid.workspace = true
 serde.workspace = true
 

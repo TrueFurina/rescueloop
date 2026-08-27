@@ -5,6 +5,12 @@ use std::{collections::BTreeMap, path::Path, time::Instant};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
+#[tracing::instrument(
+    name = "supervision.run",
+    skip(executable, args),
+    fields(record_arguments = record_args),
+    err
+)]
 pub async fn supervise(
     executable: &Path,
     args: &[String],
@@ -13,6 +19,12 @@ pub async fn supervise(
     supervise_inner(executable, args, record_args, true).await
 }
 
+#[tracing::instrument(
+    name = "supervision.run_quiet",
+    skip(executable, args),
+    fields(record_arguments = record_args),
+    err
+)]
 pub async fn supervise_quiet(
     executable: &Path,
     args: &[String],
@@ -149,6 +161,7 @@ pub struct ReplayResult {
     pub duration_ms: u128,
 }
 
+#[tracing::instrument(name = "verification.replay", skip(context), err)]
 pub async fn verify_replay(context: &LaunchContext) -> Result<ReplayResult> {
     let Some(args) = &context.arguments else {
         bail!("arguments were not recorded; exact replay is unavailable")

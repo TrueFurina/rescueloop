@@ -54,6 +54,7 @@ pub struct LedgerEntry {
     pub entry_hash: String,
 }
 
+#[tracing::instrument(name = "ledger.load", skip_all, err)]
 pub async fn load(path: &Path) -> Result<Vec<LedgerEntry>> {
     if !fs::try_exists(path).await? {
         return Ok(Vec::new());
@@ -80,6 +81,12 @@ pub async fn load(path: &Path) -> Result<Vec<LedgerEntry>> {
     Ok(entries)
 }
 
+#[tracing::instrument(
+    name = "ledger.append",
+    skip(path, new),
+    fields(incident_id = %new.incident.id, status = ?new.status),
+    err
+)]
 pub async fn append(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
     let prior = load(path).await?;
     let (relation, related_entry) = classify(&prior, &new);
