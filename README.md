@@ -200,6 +200,32 @@ The endpoint receives `AnalysisRequest` and returns `AnalysisResponse` as define
 Anthropic, Gemini, local models, or agent frameworks. A small adapter can translate this contract
 to any provider.
 
+## Local MCP integration
+
+RescueLoop can expose its local incident store to a user-selected MCP client:
+
+```sh
+rescueloop --incident-dir /absolute/path/to/.rescueloop/incidents mcp
+```
+
+The server uses local `stdio` only: it opens no network port and runs with the same OS privileges as
+the client that launches it. It exposes only `list_incidents` and `get_incident`. Both are read-only;
+incident details pass through the same bounded redaction used for AI analysis. The MCP surface does
+not expose raw artifacts, arbitrary paths, launch arguments, working directories, analysis,
+replay, repair, rollback, or shell execution.
+
+MCP requires an absolute incident directory. On Unix, RescueLoop enforces owner-only (`0700`) access
+on its state and incident directories and refuses symlinked or foreign-owned state roots. On Windows,
+it replaces inherited access with an ACL for the current user, Local System, and Administrators.
+Inbound protocol messages are capped at 1 MiB and tool arguments are validated against generated
+schemas with unknown fields rejected.
+
+Configure the MCP client with the absolute path to the `rescueloop` binary and the arguments above.
+Only configure it in clients and workspaces you trust: a local MCP process shares the launching
+client's operating-system security boundary.
+See the [MCP security and operations contract](docs/mcp-security.md) for the threat model and release
+checks.
+
 ## Security boundary
 
 - Detection never sends data over the network.

@@ -11,8 +11,10 @@ use tracing::{error, info};
 mod console;
 mod incident_store;
 mod logging;
+mod mcp;
 mod repair_flow;
 mod service;
+mod storage;
 mod tui;
 mod watch_health;
 
@@ -38,6 +40,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Serve redacted, read-only incident tools over local MCP stdio.
+    Mcp,
     /// Monitor OS diagnostic artifacts and persist normalized incidents.
     Watch,
     /// Install, remove, or inspect the per-user background watcher.
@@ -152,6 +156,7 @@ enum LogOutput {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    storage::prepare_state_store(&cli.incident_dir)?;
     let _log_guard = logging::init(&cli.incident_dir)?;
     let command = cli.command.as_ref().map_or("tui", Command::name);
     info!(
@@ -184,6 +189,7 @@ async fn main() -> Result<()> {
 async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => tui::run(cli.incident_dir, None, None).await,
+        Some(Command::Mcp) => mcp::serve(&cli.incident_dir).await,
         Some(Command::Watch) => watch(&cli.incident_dir).await,
         Some(Command::Service { action }) => match action {
             ServiceAction::Install => service::install(&cli.incident_dir).await,
@@ -271,6 +277,7 @@ async fn run(cli: Cli) -> Result<()> {
 impl Command {
     fn name(&self) -> &'static str {
         match self {
+            Self::Mcp => "mcp",
             Self::Watch => "watch",
             Self::Service { .. } => "service",
             Self::Setup => "setup",

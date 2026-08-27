@@ -5,7 +5,6 @@ use std::path::{Path, PathBuf};
 use tokio::fs;
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
-    let mut result = Vec::new();
     let paths = match incident_index(dir).await {
         Ok(index) => match index.paths_newest_first().await {
             Ok(paths) => paths,
@@ -19,6 +18,17 @@ pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
             incident_json_paths(dir).await?
         }
     };
+    load_incidents(dir, paths).await
+}
+
+/// Reads the JSON source of truth without opening, rebuilding, or quarantining the disposable index.
+pub(crate) async fn incidents_read_only(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
+    let paths = incident_json_paths(dir).await?;
+    load_incidents(dir, paths).await
+}
+
+async fn load_incidents(dir: &Path, paths: Vec<PathBuf>) -> Result<Vec<(Incident, PathBuf)>> {
+    let mut result = Vec::new();
     for path in paths {
         if let Ok(bytes) = fs::read(&path).await
             && let Ok(incident) = serde_json::from_slice::<Incident>(&bytes)

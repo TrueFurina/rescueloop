@@ -66,7 +66,15 @@ impl RollingWriter {
     pub fn new(config: WriterConfig) -> Result<Self> {
         uuid::Uuid::parse_str(&config.run_id).context("log run_id must be a UUID")?;
         fs::create_dir_all(&config.directory)?;
+        let maintenance_lock = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(config.directory.join(".rescueloop-log-maintenance"))?;
+        maintenance_lock.lock_exclusive()?;
         maintain_inactive(&config.directory, config.retention_days)?;
+        FileExt::unlock(&maintenance_lock)?;
         let lock_path = run_lock_path(&config.directory, &config.run_id);
         let run_lock = OpenOptions::new()
             .create(true)
@@ -271,14 +279,22 @@ fn remove_inactive_locks(directory: &Path) -> Result<()> {
         if path.extension().is_none_or(|value| value != "lock") {
             continue;
         }
-        let lock = OpenOptions::new().read(true).write(true).open(&path)?;
+        let lock = match OpenOptions::new().read(true).write(true).open(&path) {
+            Ok(lock) => lock,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+            Err(error) => return Err(error.into()),
+        };
         match lock.try_lock_exclusive() {
             Ok(()) => {
                 FileExt::unlock(&lock)?;
                 drop(lock);
-                fs::remove_file(&path).with_context(|| {
-                    format!("cannot remove inactive log lock: {}", path.display())
-                })?;
+                if let Err(error) = fs::remove_file(&path)
+                    && error.kind() != io::ErrorKind::NotFound
+                {
+                    return Err(error).with_context(|| {
+                        format!("cannot remove inactive log lock: {}", path.display())
+                    });
+                }
             }
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
             Err(error) => return Err(error.into()),
@@ -295,7 +311,11 @@ fn is_active(path: &Path) -> Result<bool> {
     if !lock_path.exists() {
         return Ok(false);
     }
-    let lock = OpenOptions::new().read(true).write(true).open(lock_path)?;
+    let lock = match OpenOptions::new().read(true).write(true).open(lock_path) {
+        Ok(lock) => lock,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
     match lock.try_lock_exclusive() {
         Ok(()) => {
             FileExt::unlock(&lock)?;
@@ -307,16 +327,21 @@ fn is_active(path: &Path) -> Result<bool> {
 }
 
 fn compress(path: &Path) -> io::Result<()> {
-    if !path.exists() {
-        return Ok(());
-    }
     let destination = PathBuf::from(format!("{}.gz", path.display()));
-    let mut input = File::open(path)?;
+    let mut input = match File::open(path) {
+        Ok(input) => input,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
     let output = File::create(&destination)?;
     let mut encoder = GzEncoder::new(output, Compression::fast());
     io::copy(&mut input, &mut encoder)?;
     encoder.finish()?.sync_all()?;
-    fs::remove_file(path)
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error),
+    }
 }
 
 fn prune_expired(directory: &Path, retention_days: usize) -> Result<()> {

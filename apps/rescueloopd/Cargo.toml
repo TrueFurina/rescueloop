@@ -10,6 +10,7 @@ clap.workspace = true
 chrono.workspace = true
 crossterm.workspace = true
 flate2.workspace = true
+futures.workspace = true
 fs2.workspace = true
 rescueloop-agent = { path = "../../crates/rescueloop-agent" }
 rescueloop-core = { path = "../../crates/rescueloop-core" }
@@ -19,11 +20,18 @@ rescueloop-platform = { path = "../../crates/rescueloop-platform" }
 rescueloop-repair = { path = "../../crates/rescueloop-repair" }
 ratatui.workspace = true
 reqwest.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
 libc.workspace = true
+
+[dev-dependencies]
+bytes = "1"
+rmcp = { workspace = true, features = ["client"] }

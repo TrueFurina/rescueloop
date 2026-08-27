@@ -17,12 +17,19 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      - uses: actions/setup-node@v4
+        if: runner.os != 'Windows'
+        with:
+          node-version: 24
       - run: cargo fmt --check
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Unix logging E2E
         if: runner.os != 'Windows'
         run: ./scripts/validate-logging.sh
+      - name: MCP protocol compatibility
+        if: runner.os != 'Windows'
+        run: ./scripts/validate-mcp.sh
       - name: Windows native E2E
         if: runner.os == 'Windows'
         shell: pwsh
