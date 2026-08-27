@@ -1,0 +1,17 @@
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="RescueLoop" Manufacturer="Ostapondo" Version="$(Version)" UpgradeCode="7AFC8467-29E5-4B89-9CA4-C112245FFB45" Scope="perUser">
+    <MajorUpgrade DowngradeErrorMessage="A newer RescueLoop version is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <StandardDirectory Id="LocalAppDataFolder">
+      <Directory Id="INSTALLFOLDER" Name="RescueLoop">
+        <Component Id="RescueLoopBinary" Guid="A61A5E4B-6B95-47B2-A44F-772F689F108E">
+          <File Id="RescueLoopExe" Source="$(BinaryPath)" KeyPath="yes" />
+          <Environment Id="RescueLoopPath" Name="PATH" Value="[INSTALLFOLDER]" Permanent="no" Part="last" Action="set" System="no" />
+        </Component>
+      </Directory>
+    </StandardDirectory>
+    <Feature Id="Main" Title="RescueLoop">
+      <ComponentRef Id="RescueLoopBinary" />
+    </Feature>
+  </Package>
+</Wix>

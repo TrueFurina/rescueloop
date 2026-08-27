@@ -179,7 +179,7 @@ impl AnalysisProvider for CliAnalysisProvider {
 
 fn analysis_prompt(request: &AnalysisRequest) -> Result<String, serde_json::Error> {
     Ok(format!(
-        "You are the read-only diagnostic component of RescueLoop. Analyze the Incident IR below. Return ONLY one JSON object with exactly these fields: summary:string, hypotheses:[{{cause:string,confidence:number 0..1,evidence_indexes:[integer]}}], proposed_actions:[{{action_type:string,reason:string,parameters:object,reversible:boolean}}], needs_more_evidence:boolean. Allowed action_type values are: {}. Exact parameter schemas: quarantine_path={{\"target\":string}}, regenerate_cache={{\"target\":string}}, restore_backup={{\"target\":string,\"backup_id\":string}}, repair_runtime={{\"runtime_id\":string}}, rollback_application={{\"application_id\":string,\"version\":string}}, set_permission={{\"target\":string,\"mode\":string}}, restart_service={{\"service_id\":string}}, request_more_evidence={{\"kinds\":[string]}}. Use the exact target path from evidence; never invent a path. Do not emit shell commands. Refuse by setting needs_more_evidence=true and proposed_actions=[] when evidence is insufficient. Incident IR:\n{}",
+        "You are the read-only diagnostic component of RescueLoop. Analyze the Incident IR below. Return ONLY one JSON object with exactly these fields: summary:string, hypotheses:[{{cause:string,confidence:number 0..1,evidence_indexes:[integer]}}], proposed_actions:[{{action_type:string,reason:string,parameters:object,reversible:boolean}}], needs_more_evidence:boolean. Allowed action_type values are: {}. Exact parameter schemas: quarantine_path={{\"target\":string}}, regenerate_cache={{\"target\":string}}, patch_json_config={{\"target\":string,\"pointer\":string,\"value\":any}}, set_permission={{\"target\":string,\"mode\":string}}, restart_service={{\"service_id\":string}}, restart_container={{\"engine\":\"docker\"|\"podman\",\"container_id\":string}}. Use only exact identities from evidence; never invent a path or ID. Do not emit shell commands. Refuse by setting needs_more_evidence=true and proposed_actions=[] when evidence is insufficient. Incident IR:\n{}",
         request.allowed_actions.join(", "),
         serde_json::to_string(request)?
     ))
@@ -231,13 +231,11 @@ impl AnalysisProvider for HttpAnalysisProvider {
 
 pub const ALLOWED_ACTIONS: &[&str] = &[
     "quarantine_path",
-    "restore_backup",
     "regenerate_cache",
-    "repair_runtime",
-    "rollback_application",
+    "patch_json_config",
     "set_permission",
     "restart_service",
-    "request_more_evidence",
+    "restart_container",
 ];
 
 pub fn validate(
@@ -267,7 +265,13 @@ pub fn validate(
                 action.action_type
             )));
         }
-        if !action.reversible && action.action_type != "request_more_evidence" {
+        if !request.allowed_actions.contains(&action.action_type) {
+            return Err(AnalysisError::Invalid(format!(
+                "action is unavailable on this platform: {}",
+                action.action_type
+            )));
+        }
+        if !action.reversible {
             return Err(AnalysisError::Invalid(format!(
                 "non-reversible action rejected: {}",
                 action.action_type
@@ -284,12 +288,10 @@ fn validate_parameters(
 ) -> Result<(), AnalysisError> {
     let required: &[&str] = match action_type {
         "quarantine_path" | "regenerate_cache" => &["target"],
-        "restore_backup" => &["target", "backup_id"],
-        "repair_runtime" => &["runtime_id"],
-        "rollback_application" => &["application_id", "version"],
+        "patch_json_config" => &["target", "pointer", "value"],
         "set_permission" => &["target", "mode"],
         "restart_service" => &["service_id"],
-        "request_more_evidence" => &["kinds"],
+        "restart_container" => &["engine", "container_id"],
         _ => return Ok(()),
     };
     let object = parameters.as_object().ok_or_else(|| {
@@ -300,6 +302,53 @@ fn validate_parameters(
             return Err(AnalysisError::Invalid(format!(
                 "{action_type} is missing parameter: {key}"
             )));
+        }
+    }
+    let require_string = |key: &str| {
+        object
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .filter(|value| !value.trim().is_empty())
+            .ok_or_else(|| {
+                AnalysisError::Invalid(format!(
+                    "{action_type} parameter {key} must be a non-empty string"
+                ))
+            })
+    };
+    match action_type {
+        "quarantine_path" | "regenerate_cache" | "patch_json_config" | "set_permission" => {
+            require_string("target")?;
+        }
+        "restart_service" => {
+            require_string("service_id")?;
+        }
+        "restart_container" => {
+            let engine = require_string("engine")?;
+            if !matches!(engine, "docker" | "podman") {
+                return Err(AnalysisError::Invalid(
+                    "restart_container engine must be docker or podman".into(),
+                ));
+            }
+            require_string("container_id")?;
+        }
+        _ => {}
+    }
+    if action_type == "set_permission" {
+        let mode = require_string("mode")?.trim_start_matches("0o");
+        let parsed = u32::from_str_radix(mode, 8)
+            .map_err(|_| AnalysisError::Invalid("permission mode must be octal".into()))?;
+        if parsed > 0o7777 {
+            return Err(AnalysisError::Invalid(
+                "permission mode exceeds supported POSIX bits".into(),
+            ));
+        }
+    }
+    if action_type == "patch_json_config" {
+        let pointer = require_string("pointer")?;
+        if !pointer.starts_with('/') {
+            return Err(AnalysisError::Invalid(
+                "JSON pointer must start with /".into(),
+            ));
         }
     }
     Ok(())
@@ -324,11 +373,10 @@ mod tests {
                 fields: BTreeMap::new(),
             },
         );
-        AnalysisRequest {
-            schema_version: 1,
-            allowed_actions: ALLOWED_ACTIONS.iter().map(|x| x.to_string()).collect(),
+        AnalysisRequest::bounded(
             incident,
-        }
+            ALLOWED_ACTIONS.iter().map(|x| x.to_string()).collect(),
+        )
     }
 
     #[test]
@@ -357,6 +405,22 @@ mod tests {
                 action_type: "quarantine_path".into(),
                 reason: "x".into(),
                 parameters: json!({}),
+                reversible: true,
+            }],
+        };
+        assert!(validate(&request(), &response).is_err());
+    }
+
+    #[test]
+    fn rejects_invalid_typed_parameters() {
+        let response = AnalysisResponse {
+            summary: "x".into(),
+            hypotheses: vec![],
+            needs_more_evidence: false,
+            proposed_actions: vec![ProposedAction {
+                action_type: "restart_container".into(),
+                reason: "x".into(),
+                parameters: json!({"engine":"shell", "container_id":"abc"}),
                 reversible: true,
             }],
         };

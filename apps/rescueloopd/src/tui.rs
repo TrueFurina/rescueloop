@@ -1,6 +1,6 @@
 use crate::{
     analyze_with_provider, configured_provider, dismiss_incident, incidents, local_timestamp,
-    repair,
+    record_incident_status, repair,
 };
 use anyhow::Result;
 use crossterm::{
@@ -89,10 +89,27 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
             {
                 match result {
                     Ok(analysis) => {
+                        let status = if analysis.proposed_actions.is_empty() {
+                            IncidentStatus::Diagnosed
+                        } else {
+                            IncidentStatus::RepairProposed
+                        };
+                        if let Some((incident, _)) = app.incidents.get(app.selected) {
+                            record_incident_status(&dir, incident, status, None).await?;
+                        }
                         app.analysis = Some(analysis);
                         app.state = UiState::Ready;
                     }
                     Err(error) => {
+                        if let Some((incident, _)) = app.incidents.get(app.selected) {
+                            record_incident_status(
+                                &dir,
+                                incident,
+                                IncidentStatus::Detected,
+                                Some(serde_json::json!({"analysis_error": error.clone()})),
+                            )
+                            .await?;
+                        }
                         app.state = UiState::Message(format!("AI analysis failed safely:\n{error}"))
                     }
                 }
@@ -160,6 +177,13 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                     tokio::fs::create_dir_all(&output_dir).await?;
                     let output = output_dir.join(format!("{}.json", incident.id));
                     let tx = sender.clone();
+                    record_incident_status(
+                        &dir,
+                        &incident,
+                        IncidentStatus::Investigating,
+                        None,
+                    )
+                    .await?;
                     tokio::spawn(async move {
                         let result = analyze_with_provider(&path, provider.as_ref(), Some(&output))
                             .await
@@ -181,20 +205,13 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                     let Some(proposal) = analysis.proposed_actions.first() else {
                         continue;
                     };
-                    let Some(target) = proposal.parameters.get("target").and_then(|v| v.as_str()) else {
-                        app.state = UiState::Message("Repair has no valid target. Nothing changed.".into());
-                        continue;
-                    };
-                    let target = PathBuf::from(target);
-                    let Some(allowed_root) = target.parent().map(PathBuf::from) else {
-                        app.state = UiState::Message("Repair target has no safe parent scope. Nothing changed.".into());
-                        continue;
-                    };
+                    let target = proposal.parameters.get("target").and_then(|v| v.as_str()).map(PathBuf::from);
+                    let allowed_roots = target.as_ref().and_then(|path| path.parent()).map(PathBuf::from).into_iter().collect();
                     let analysis_path = dir.parent().unwrap_or(&dir).join("analyses").join(format!("{}.json", app.incidents[app.selected].0.id));
                     let incident_dir = dir.clone();
                     let tx = repair_sender.clone();
                     tokio::spawn(async move {
-                        let result = if !target.exists() {
+                        let result = if target.as_ref().is_some_and(|target| !target.exists()) {
                             match incident.launch_context.as_ref() {
                                 Some(context) => match rescueloop_platform::verify_replay(context).await {
                                     Ok(replay) if replay.passed => Ok(
@@ -215,7 +232,7 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                                 ),
                             }
                         } else {
-                            repair(&incident_dir, &incident_path, &analysis_path, 0, vec![allowed_root], true)
+                            repair(&incident_dir, &incident_path, &analysis_path, 0, allowed_roots, true)
                                 .await
                                 .map(|_| "REPAIR WORKFLOW FINISHED\n\nThe original action was replayed. The repair was verified or automatically rolled back; a transaction receipt was saved.".to_string())
                                 .map_err(|e| e.to_string())
@@ -383,12 +400,15 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
                         .unwrap_or("Unknown application"),
                 ),
                 Cell::from(format!("{:?}", incident.kind)),
-                Cell::from(local_timestamp(incident.observed_at)),
+                Cell::from(format!("×{}", incident.occurrence_count)),
+                Cell::from(local_timestamp(
+                    incident.last_observed_at.unwrap_or(incident.observed_at),
+                )),
                 Cell::from(format!("{:?}", incident.status)),
             ])
         })
         .collect::<Vec<_>>();
-    let header = Row::new(["APPLICATION", "PROBLEM", "LOCAL TIME", "STATUS"])
+    let header = Row::new(["APPLICATION", "PROBLEM", "COUNT", "LOCAL TIME", "STATUS"])
         .style(
             Style::default()
                 .fg(Color::Yellow)
@@ -400,6 +420,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         [
             Constraint::Fill(3),
             Constraint::Fill(4),
+            Constraint::Length(8),
             Constraint::Length(20),
             Constraint::Length(16),
         ],
@@ -549,7 +570,7 @@ fn detail_text(app: &App) -> String {
     }
     if app.show_details {
         return format!(
-            "PROBLEM\n{}\n\nAPPLICATION\n{}\n\nTYPE\n{:?}\n\nSTATUS\n{:?}\n\nDETECTED\n{}\n\nCONFIDENCE\n{:?}\n\nEVIDENCE\n{}",
+            "PROBLEM\n{}\n\nAPPLICATION\n{}\n\nTYPE\n{:?}\n\nSTATUS\n{:?}\n\nOCCURRENCES\n{}\n\nFIRST DETECTED\n{}\n\nLAST DETECTED\n{}\n\nCONFIDENCE\n{:?}\n\nEVIDENCE\n{}",
             incident.message,
             incident
                 .application
@@ -557,7 +578,9 @@ fn detail_text(app: &App) -> String {
                 .unwrap_or("Unknown application"),
             incident.kind,
             incident.status,
-            local_timestamp(incident.observed_at),
+            incident.occurrence_count,
+            local_timestamp(incident.first_observed_at.unwrap_or(incident.observed_at)),
+            local_timestamp(incident.last_observed_at.unwrap_or(incident.observed_at)),
             incident.confidence,
             serde_json::to_string_pretty(&incident.evidence).unwrap_or_default()
         );

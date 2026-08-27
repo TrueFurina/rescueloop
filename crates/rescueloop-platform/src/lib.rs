@@ -1,4 +1,6 @@
 mod artifact_watcher;
+mod container_events;
+mod os_events;
 mod supervised;
 
 use anyhow::Result;
@@ -6,6 +8,24 @@ use rescueloop_core::IncidentCollector;
 use std::path::PathBuf;
 
 pub use supervised::{ReplayResult, supervise, supervise_quiet, verify_replay};
+
+pub fn event_sources(enabled: &[String]) -> Result<Vec<Box<dyn IncidentCollector>>> {
+    let has = |name: &str| enabled.iter().any(|value| value == name);
+    let mut sources = Vec::new();
+    if has("system-artifacts") {
+        sources.push(system_collector()?);
+    }
+    if has("containers") {
+        sources.extend(container_events::available_sources());
+    }
+    if has("os-log") {
+        sources.extend(os_events::available_sources());
+    }
+    if sources.is_empty() {
+        anyhow::bail!("no available event sources are enabled")
+    }
+    Ok(sources)
+}
 
 pub fn system_collector() -> Result<Box<dyn IncidentCollector>> {
     #[cfg(target_os = "macos")]

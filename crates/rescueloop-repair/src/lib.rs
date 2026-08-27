@@ -8,15 +8,195 @@ use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "type", rename_all = "snake_case")]
+pub enum OperationalAction {
+    RestartContainer {
+        engine: String,
+        container_id: String,
+    },
+    RestartService {
+        service_id: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OperationalReceipt {
+    pub id: Uuid,
+    pub action: OperationalAction,
+    pub previous_running: bool,
+    pub verified: bool,
+    pub rolled_back: bool,
+}
+
+pub fn compile_operational(proposal: &ProposedAction) -> Result<Option<OperationalAction>> {
+    let string = |key: &str| {
+        proposal
+            .parameters
+            .get(key)
+            .and_then(|value| value.as_str())
+            .with_context(|| format!("{} has no {key}", proposal.action_type))
+    };
+    let action = match proposal.action_type.as_str() {
+        "restart_container" => {
+            let engine = string("engine")?.to_string();
+            if !matches!(engine.as_str(), "docker" | "podman") {
+                bail!("unsupported container engine")
+            }
+            OperationalAction::RestartContainer {
+                engine,
+                container_id: string("container_id")?.to_string(),
+            }
+        }
+        "restart_service" => OperationalAction::RestartService {
+            service_id: string("service_id")?.to_string(),
+        },
+        _ => return Ok(None),
+    };
+    Ok(Some(action))
+}
+
+pub async fn execute_operational(
+    action: OperationalAction,
+    allowed_id: &str,
+) -> Result<OperationalReceipt> {
+    let id = match &action {
+        OperationalAction::RestartContainer { container_id, .. } => container_id,
+        OperationalAction::RestartService { service_id } => service_id,
+    };
+    if id != allowed_id || id.is_empty() {
+        bail!("operational target is not the exact evidenced identity")
+    }
+    match &action {
+        OperationalAction::RestartContainer {
+            engine,
+            container_id,
+        } => {
+            let previous_running = container_running(engine, container_id).await?;
+            let status = tokio::process::Command::new(engine)
+                .args(["restart", container_id])
+                .status()
+                .await?;
+            if !status.success() {
+                bail!("container engine rejected restart")
+            }
+            let verified = container_running(engine, container_id).await?;
+            let mut rolled_back = false;
+            if !verified && !previous_running {
+                let _ = tokio::process::Command::new(engine)
+                    .args(["stop", container_id])
+                    .status()
+                    .await;
+                rolled_back = true;
+            }
+            Ok(OperationalReceipt {
+                id: Uuid::new_v4(),
+                action,
+                previous_running,
+                verified,
+                rolled_back,
+            })
+        }
+        OperationalAction::RestartService { service_id } => {
+            execute_service(action.clone(), service_id).await
+        }
+    }
+}
+
+async fn container_running(engine: &str, id: &str) -> Result<bool> {
+    let output = tokio::process::Command::new(engine)
+        .args(["inspect", "--format", "{{.State.Running}}", id])
+        .output()
+        .await?;
+    Ok(output.status.success() && String::from_utf8_lossy(&output.stdout).trim() == "true")
+}
+
+#[allow(clippy::needless_return)]
+async fn execute_service(
+    action: OperationalAction,
+    service_id: &str,
+) -> Result<OperationalReceipt> {
+    #[cfg(target_os = "macos")]
+    {
+        let previous_running = tokio::process::Command::new("launchctl")
+            .args(["print", service_id])
+            .output()
+            .await?
+            .status
+            .success();
+        let status = tokio::process::Command::new("launchctl")
+            .args(["kickstart", "-k", service_id])
+            .status()
+            .await?;
+        let verified = status.success()
+            && tokio::process::Command::new("launchctl")
+                .args(["print", service_id])
+                .output()
+                .await?
+                .status
+                .success();
+        return Ok(OperationalReceipt {
+            id: Uuid::new_v4(),
+            action,
+            previous_running,
+            verified,
+            rolled_back: false,
+        });
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let previous_running = tokio::process::Command::new("sc.exe")
+            .args(["query", service_id])
+            .output()
+            .await?
+            .stdout
+            .windows(7)
+            .any(|value| value == b"RUNNING");
+        let _ = tokio::process::Command::new("sc.exe")
+            .args(["stop", service_id])
+            .status()
+            .await;
+        let status = tokio::process::Command::new("sc.exe")
+            .args(["start", service_id])
+            .status()
+            .await?;
+        return Ok(OperationalReceipt {
+            id: Uuid::new_v4(),
+            action,
+            previous_running,
+            verified: status.success(),
+            rolled_back: false,
+        });
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    bail!("service repair supports macOS and Windows")
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum RepairAction {
-    QuarantinePath { target: PathBuf },
-    RegenerateCache { target: PathBuf },
+    QuarantinePath {
+        target: PathBuf,
+    },
+    RegenerateCache {
+        target: PathBuf,
+    },
+    PatchJson {
+        target: PathBuf,
+        pointer: String,
+        value: serde_json::Value,
+    },
+    SetPermission {
+        target: PathBuf,
+        mode: u32,
+    },
 }
 
 impl RepairAction {
     pub fn target(&self) -> &Path {
         match self {
-            Self::QuarantinePath { target } | Self::RegenerateCache { target } => target,
+            Self::QuarantinePath { target }
+            | Self::RegenerateCache { target }
+            | Self::PatchJson { target, .. }
+            | Self::SetPermission { target, .. } => target,
         }
     }
 }
@@ -42,6 +222,33 @@ pub fn compile(proposal: &ProposedAction) -> Result<RepairPlan> {
         },
         "regenerate_cache" => RepairAction::RegenerateCache {
             target: PathBuf::from(target),
+        },
+        "patch_json_config" => RepairAction::PatchJson {
+            target: PathBuf::from(target),
+            pointer: proposal
+                .parameters
+                .get("pointer")
+                .and_then(|value| value.as_str())
+                .context("JSON config repair has no pointer")?
+                .to_string(),
+            value: proposal
+                .parameters
+                .get("value")
+                .context("JSON config repair has no value")?
+                .clone(),
+        },
+        "set_permission" => RepairAction::SetPermission {
+            target: PathBuf::from(target),
+            mode: u32::from_str_radix(
+                proposal
+                    .parameters
+                    .get("mode")
+                    .and_then(|value| value.as_str())
+                    .context("permission repair has no mode")?
+                    .trim_start_matches("0o"),
+                8,
+            )
+            .context("permission mode must be octal")?,
         },
         other => bail!("repair action is not executable in this milestone: {other}"),
     };
@@ -118,6 +325,8 @@ pub struct Transaction {
     pub action: RepairAction,
     pub original: PathBuf,
     pub backup: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub original_mode: Option<u32>,
 }
 
 pub async fn prepare(
@@ -131,6 +340,13 @@ pub async fn prepare(
         .file_name()
         .context("repair target has no filename")?;
     let backup = transaction_root.join(id.to_string()).join(filename);
+    #[cfg(unix)]
+    let original_mode = {
+        use std::os::unix::fs::PermissionsExt;
+        Some(std::fs::metadata(&original)?.permissions().mode() & 0o7777)
+    };
+    #[cfg(not(unix))]
+    let original_mode = None;
     Ok(Transaction {
         schema_version: 1,
         id,
@@ -139,12 +355,24 @@ pub async fn prepare(
         action: plan.action.clone(),
         original,
         backup,
+        original_mode,
     })
 }
 
 pub async fn apply(transaction: &mut Transaction) -> Result<()> {
     if transaction.state != TransactionState::Prepared {
         bail!("transaction is not prepared")
+    }
+    #[cfg(unix)]
+    if let RepairAction::SetPermission { target, mode } = &transaction.action {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(target, std::fs::Permissions::from_mode(*mode)).await?;
+        transaction.state = TransactionState::Applied;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    if matches!(transaction.action, RepairAction::SetPermission { .. }) {
+        bail!("POSIX permission repair is unavailable on this platform")
     }
     let parent = transaction
         .backup
@@ -156,7 +384,24 @@ pub async fn apply(transaction: &mut Transaction) -> Result<()> {
         .context(
             "backup move failed; target and transaction directory must be on the same filesystem",
         )?;
-    if matches!(transaction.action, RepairAction::RegenerateCache { .. })
+    if let RepairAction::PatchJson { pointer, value, .. } = &transaction.action {
+        let result = async {
+            let bytes = fs::read(&transaction.backup).await?;
+            let mut document: serde_json::Value =
+                serde_json::from_slice(&bytes).context("target is not valid JSON")?;
+            let slot = document
+                .pointer_mut(pointer)
+                .with_context(|| format!("JSON pointer does not exist: {pointer}"))?;
+            *slot = value.clone();
+            fs::write(&transaction.original, serde_json::to_vec_pretty(&document)?).await?;
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+        if let Err(error) = result {
+            let _ = fs::rename(&transaction.backup, &transaction.original).await;
+            return Err(error).context("failed to apply JSON config patch");
+        }
+    } else if matches!(transaction.action, RepairAction::RegenerateCache { .. })
         && let Err(error) = fs::create_dir(&transaction.original).await
     {
         let _ = fs::rename(&transaction.backup, &transaction.original).await;
@@ -170,6 +415,20 @@ pub async fn rollback(transaction: &mut Transaction) -> Result<()> {
     if transaction.state != TransactionState::Applied {
         bail!("only an applied transaction can be rolled back")
     }
+    #[cfg(unix)]
+    if let RepairAction::SetPermission { target, .. } = &transaction.action {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = transaction
+            .original_mode
+            .context("original mode was not recorded")?;
+        fs::set_permissions(target, std::fs::Permissions::from_mode(mode)).await?;
+        transaction.state = TransactionState::RolledBack;
+        return Ok(());
+    }
+    #[cfg(not(unix))]
+    if matches!(transaction.action, RepairAction::SetPermission { .. }) {
+        bail!("POSIX permission rollback is unavailable on this platform")
+    }
     if matches!(transaction.action, RepairAction::RegenerateCache { .. })
         && fs::try_exists(&transaction.original).await?
     {
@@ -181,6 +440,11 @@ pub async fn rollback(transaction: &mut Transaction) -> Result<()> {
         } else {
             bail!("regenerated cache target changed type; refusing rollback")
         }
+    }
+    if matches!(transaction.action, RepairAction::PatchJson { .. })
+        && fs::try_exists(&transaction.original).await?
+    {
+        fs::remove_file(&transaction.original).await?;
     }
     fs::rename(&transaction.backup, &transaction.original)
         .await
@@ -300,5 +564,73 @@ mod tests {
         assert_eq!(tx.state, TransactionState::Verified);
         assert!(tx.backup.exists());
         assert!(!target.exists());
+    }
+
+    #[tokio::test]
+    async fn json_patch_is_typed_and_rolls_back_to_exact_bytes() {
+        let temp = tempdir().unwrap();
+        let scope = temp.path().join("app");
+        fs::create_dir_all(&scope).await.unwrap();
+        let target = scope.join("config.json");
+        let original = br#"{"server":{"port":8080}}"#;
+        fs::write(&target, original).await.unwrap();
+        let proposal = ProposedAction {
+            action_type: "patch_json_config".into(),
+            reason: "fix port".into(),
+            parameters: json!({"target": target, "pointer": "/server/port", "value": 8081}),
+            reversible: true,
+        };
+        let policy = ScopePolicy::new(vec![scope]).unwrap();
+        let mut tx = prepare(
+            &compile(&proposal).unwrap(),
+            &policy,
+            &temp.path().join("transactions"),
+        )
+        .await
+        .unwrap();
+        apply(&mut tx).await.unwrap();
+        let changed: serde_json::Value =
+            serde_json::from_slice(&fs::read(&target).await.unwrap()).unwrap();
+        assert_eq!(changed.pointer("/server/port"), Some(&json!(8081)));
+        rollback(&mut tx).await.unwrap();
+        assert_eq!(fs::read(&target).await.unwrap(), original);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permission_change_restores_original_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = tempdir().unwrap();
+        let scope = temp.path().join("app");
+        fs::create_dir_all(&scope).await.unwrap();
+        let target = scope.join("tool");
+        fs::write(&target, b"test").await.unwrap();
+        fs::set_permissions(&target, std::fs::Permissions::from_mode(0o600))
+            .await
+            .unwrap();
+        let proposal = ProposedAction {
+            action_type: "set_permission".into(),
+            reason: "make executable".into(),
+            parameters: json!({"target":target,"mode":"0755"}),
+            reversible: true,
+        };
+        let policy = ScopePolicy::new(vec![scope]).unwrap();
+        let mut tx = prepare(
+            &compile(&proposal).unwrap(),
+            &policy,
+            &temp.path().join("tx"),
+        )
+        .await
+        .unwrap();
+        apply(&mut tx).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o755
+        );
+        rollback(&mut tx).await.unwrap();
+        assert_eq!(
+            std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
     }
 }

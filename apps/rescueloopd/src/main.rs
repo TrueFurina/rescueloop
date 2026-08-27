@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use rescueloop_agent::{ALLOWED_ACTIONS, AgentConfig, CliAnalysisProvider, HttpAnalysisProvider};
 use rescueloop_core::{AnalysisProvider, AnalysisRequest, Incident};
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -9,6 +10,7 @@ use std::time::Duration;
 use tokio::fs;
 use tracing::info;
 
+mod service;
 mod tui;
 
 #[derive(Parser)]
@@ -18,7 +20,7 @@ mod tui;
 )]
 struct Cli {
     #[command(subcommand)]
-    command: Command,
+    command: Option<Command>,
     #[arg(long, default_value = ".rescueloop/incidents", global = true)]
     incident_dir: PathBuf,
 }
@@ -27,8 +29,18 @@ struct Cli {
 enum Command {
     /// Monitor OS diagnostic artifacts and persist normalized incidents.
     Watch,
+    /// Install, remove, or inspect the per-user background watcher.
+    Service {
+        #[command(subcommand)]
+        action: ServiceAction,
+    },
     /// Detect installed AI agents and save the selected provider.
     Setup,
+    /// Inspect or change enabled event sources.
+    Sources {
+        #[command(subcommand)]
+        action: SourcesAction,
+    },
     /// Connect to the background detector through the local incident store.
     Console {
         #[arg(long, env = "RESCUELOOP_AI_ENDPOINT")]
@@ -65,11 +77,50 @@ enum Command {
         analysis: PathBuf,
         #[arg(long, default_value_t = 0)]
         action_index: usize,
-        #[arg(long, required = true)]
+        #[arg(long)]
         allow_root: Vec<PathBuf>,
         #[arg(long)]
         approve: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ServiceAction {
+    Install,
+    InstallSystem,
+    Uninstall,
+    UninstallSystem,
+    Status,
+}
+
+#[derive(Subcommand)]
+enum SourcesAction {
+    List,
+    Enable { name: String },
+    Disable { name: String },
+}
+
+const SOURCE_NAMES: &[&str] = &["system-artifacts", "containers", "os-log"];
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct Settings {
+    #[serde(default = "default_sources")]
+    enabled_sources: Vec<String>,
+}
+
+fn default_sources() -> Vec<String> {
+    SOURCE_NAMES
+        .iter()
+        .map(|value| (*value).to_string())
+        .collect()
+}
+
+impl Default for Settings {
+    fn default() -> Self {
+        Self {
+            enabled_sources: default_sources(),
+        }
+    }
 }
 
 #[tokio::main]
@@ -79,38 +130,47 @@ async fn main() -> Result<()> {
         .init();
     let cli = Cli::parse();
     match cli.command {
-        Command::Watch => watch(&cli.incident_dir).await,
-        Command::Setup => setup(&cli.incident_dir).await,
-        Command::Console {
+        None => tui::run(cli.incident_dir, None, None).await,
+        Some(Command::Watch) => watch(&cli.incident_dir).await,
+        Some(Command::Service { action }) => match action {
+            ServiceAction::Install => service::install(&cli.incident_dir).await,
+            ServiceAction::InstallSystem => service::install_system(&cli.incident_dir).await,
+            ServiceAction::Uninstall => service::uninstall().await,
+            ServiceAction::UninstallSystem => service::uninstall_system().await,
+            ServiceAction::Status => service::status().await,
+        },
+        Some(Command::Setup) => setup(&cli.incident_dir).await,
+        Some(Command::Sources { action }) => sources(&cli.incident_dir, action).await,
+        Some(Command::Console {
             endpoint,
             token,
             plain,
-        } => {
+        }) => {
             if plain {
                 console(&cli.incident_dir, endpoint, token).await
             } else {
                 tui::run(cli.incident_dir, endpoint, token).await
             }
         }
-        Command::Analyze {
+        Some(Command::Analyze {
             incident,
             endpoint,
             token,
             output,
-        } => analyze(&incident, endpoint, token, output.as_deref()).await,
-        Command::Run {
+        }) => analyze(&incident, endpoint, token, output.as_deref()).await,
+        Some(Command::Run {
             record_args,
             executable,
             args,
-        } => run_supervised(&cli.incident_dir, executable, args, record_args).await,
-        Command::Replay { incident } => replay(&incident).await,
-        Command::Repair {
+        }) => run_supervised(&cli.incident_dir, executable, args, record_args).await,
+        Some(Command::Replay { incident }) => replay(&incident).await,
+        Some(Command::Repair {
             incident,
             analysis,
             action_index,
             allow_root,
             approve,
-        } => {
+        }) => {
             repair(
                 &cli.incident_dir,
                 &incident,
@@ -275,23 +335,21 @@ async fn incident_menu(
                     "Parameters: {}",
                     serde_json::to_string_pretty(&proposal.parameters)?
                 );
-                let Some(target) = proposal
+                let target = proposal
                     .parameters
                     .get("target")
                     .and_then(|value| value.as_str())
-                else {
-                    println!("This proposal cannot be executed by the guided MVP yet.");
-                    continue;
-                };
-                let target = PathBuf::from(target);
-                let allowed_root = target
-                    .parent()
-                    .context("repair target has no parent scope")?
-                    .to_path_buf();
+                    .map(PathBuf::from);
+                let allowed_roots = target
+                    .as_ref()
+                    .and_then(|target| target.parent())
+                    .map(PathBuf::from)
+                    .into_iter()
+                    .collect::<Vec<_>>();
                 println!("\nSafety review (no changes yet):");
-                repair(dir, &path, &output, 0, vec![allowed_root.clone()], false).await?;
+                repair(dir, &path, &output, 0, allowed_roots.clone(), false).await?;
                 if confirm("Apply this exact repair and replay the original action? [y/N] ")? {
-                    repair(dir, &path, &output, 0, vec![allowed_root], true).await?;
+                    repair(dir, &path, &output, 0, allowed_roots, true).await?;
                     return Ok(());
                 }
                 println!("Repair cancelled; no changes made.");
@@ -309,51 +367,160 @@ async fn setup(incident_dir: &Path) -> Result<()> {
     if detected.is_empty() {
         println!("No supported local AI agents found in PATH.");
         println!("You can still use an HTTP adapter with --endpoint <URL>.");
-        return Ok(());
-    }
-    println!("Detected AI agents:");
-    for (index, agent) in detected.iter().enumerate() {
-        println!(
-            "[{}] {:?} — {}",
-            index + 1,
-            agent.agent,
-            agent.executable.display()
-        );
-    }
-    let config = loop {
-        print!(
-            "Select exactly one agent [1-{}], or q to cancel: ",
-            detected.len()
-        );
-        io::stdout().flush()?;
-        let mut answer = String::new();
-        io::stdin().read_line(&mut answer)?;
-        let answer = answer.trim();
-        if answer.eq_ignore_ascii_case("q") {
-            println!("Setup cancelled; no agent was selected.");
-            return Ok(());
+    } else {
+        println!("Detected AI agents:");
+        for (index, agent) in detected.iter().enumerate() {
+            println!(
+                "[{}] {:?} — {}",
+                index + 1,
+                agent.agent,
+                agent.executable.display()
+            );
         }
-        let Ok(selected) = answer.parse::<usize>() else {
-            println!("A numeric selection is required; Enter alone does not select a default.");
-            continue;
+        let config = loop {
+            print!(
+                "Select exactly one agent [1-{}], or q to skip AI setup: ",
+                detected.len()
+            );
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            let answer = answer.trim();
+            if answer.eq_ignore_ascii_case("q") {
+                println!("AI setup skipped; detection setup will continue.");
+                break None;
+            }
+            let Ok(selected) = answer.parse::<usize>() else {
+                println!("A numeric selection is required; Enter alone does not select a default.");
+                continue;
+            };
+            let Some(config) = selected
+                .checked_sub(1)
+                .and_then(|index| detected.get(index))
+            else {
+                println!("Selection is out of range.");
+                continue;
+            };
+            break Some(config);
         };
-        let Some(config) = selected
-            .checked_sub(1)
-            .and_then(|index| detected.get(index))
-        else {
-            println!("Selection is out of range.");
-            continue;
-        };
-        break config;
+        if let Some(config) = config {
+            let path = config_path(incident_dir);
+            if let Some(parent) = path.parent() {
+                fs::create_dir_all(parent).await?;
+            }
+            fs::write(&path, serde_json::to_vec_pretty(config)?).await?;
+            println!("Selected: {:?}", config.agent);
+            println!("Configuration saved to {}", path.display());
+            println!("The agent runs read-only; Repair IR is validated before approval.");
+        }
+    }
+
+    let mut settings = load_settings(incident_dir).await?;
+    println!("\nEvent sources:");
+    for source in SOURCE_NAMES {
+        let enabled = settings.enabled_sources.iter().any(|value| value == source);
+        if confirm_default(
+            &format!(
+                "Enable {source}? [{}] ",
+                if enabled { "Y/n" } else { "y/N" }
+            ),
+            enabled,
+        )? {
+            if !enabled {
+                settings.enabled_sources.push((*source).into());
+            }
+        } else if enabled {
+            settings.enabled_sources.retain(|value| value != source);
+        }
+    }
+    save_settings(incident_dir, &settings).await?;
+
+    let installed = if confirm_default("\nInstall `rescueloop` into your user PATH? [Y/n] ", true)?
+    {
+        let destination = service::install_to_path().await?;
+        println!("Installed executable: {}", destination.display());
+        Some(destination)
+    } else {
+        None
     };
-    let path = config_path(incident_dir);
+    if confirm_default(
+        "Start RescueLoop automatically when you sign in? [Y/n] ",
+        true,
+    )? {
+        service::install_using(incident_dir, installed.as_deref()).await?;
+    }
+    println!("\nSetup complete. Run `rescueloop` to open the console.");
+    Ok(())
+}
+
+fn settings_path(incident_dir: &Path) -> PathBuf {
+    incident_dir
+        .parent()
+        .unwrap_or(incident_dir)
+        .join("settings.json")
+}
+
+async fn load_settings(incident_dir: &Path) -> Result<Settings> {
+    let path = settings_path(incident_dir);
+    if !fs::try_exists(&path).await? {
+        return Ok(Settings::default());
+    }
+    serde_json::from_slice(&fs::read(&path).await?).context("invalid RescueLoop settings")
+}
+
+async fn save_settings(incident_dir: &Path, settings: &Settings) -> Result<()> {
+    let path = settings_path(incident_dir);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).await?;
     }
-    fs::write(&path, serde_json::to_vec_pretty(config)?).await?;
-    println!("Selected: {:?}", config.agent);
-    println!("Configuration saved to {}", path.display());
-    println!("The agent runs read-only; Repair IR is validated before approval.");
+    fs::write(path, serde_json::to_vec_pretty(settings)?).await?;
+    Ok(())
+}
+
+async fn sources(incident_dir: &Path, action: SourcesAction) -> Result<()> {
+    let mut settings = load_settings(incident_dir).await?;
+    let mut changed = false;
+    match action {
+        SourcesAction::List => {}
+        SourcesAction::Enable { name } | SourcesAction::Disable { name }
+            if !SOURCE_NAMES.contains(&name.as_str()) =>
+        {
+            anyhow::bail!(
+                "unknown event source `{name}`; valid sources: {}",
+                SOURCE_NAMES.join(", ")
+            )
+        }
+        SourcesAction::Enable { name } => {
+            if !settings.enabled_sources.contains(&name) {
+                settings.enabled_sources.push(name);
+                save_settings(incident_dir, &settings).await?;
+                changed = true;
+            }
+        }
+        SourcesAction::Disable { name } => {
+            settings.enabled_sources.retain(|value| value != &name);
+            save_settings(incident_dir, &settings).await?;
+            changed = true;
+        }
+    }
+    for source in SOURCE_NAMES {
+        println!(
+            "{:<18} {}",
+            source,
+            if settings.enabled_sources.iter().any(|value| value == source) {
+                "enabled"
+            } else {
+                "disabled"
+            }
+        );
+    }
+    if changed {
+        if service::restart_if_installed().await? {
+            println!("Background watcher restarted with the new source configuration.");
+        } else {
+            println!("Settings saved. They apply on the next watcher start.");
+        }
+    }
     Ok(())
 }
 
@@ -399,6 +566,18 @@ fn confirm(prompt: &str) -> Result<bool> {
         answer.trim().to_ascii_lowercase().as_str(),
         "y" | "yes"
     ))
+}
+
+fn confirm_default(prompt: &str, default: bool) -> Result<bool> {
+    print!("{prompt}");
+    io::stdout().flush()?;
+    let mut answer = String::new();
+    io::stdin().read_line(&mut answer)?;
+    let answer = answer.trim().to_ascii_lowercase();
+    if answer.is_empty() {
+        return Ok(default);
+    }
+    Ok(matches!(answer.as_str(), "y" | "yes"))
 }
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
@@ -497,6 +676,34 @@ async fn incident_by_number(dir: &Path, number: &str) -> Result<Incident> {
 
 async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir).await?;
+    let group_key = incident_group_key(incident);
+    if let Some((mut existing, path)) = incidents(dir).await?.into_iter().find(|(candidate, _)| {
+        (candidate.group_key == group_key || incident_group_key(candidate) == group_key)
+            && !matches!(
+                candidate.status,
+                rescueloop_core::IncidentStatus::VerifiedFixed
+                    | rescueloop_core::IncidentStatus::Superseded
+            )
+    }) {
+        existing.group_key = group_key;
+        existing.occurrence_count = existing.occurrence_count.max(1) + 1;
+        existing.first_observed_at = existing.first_observed_at.or(Some(existing.observed_at));
+        existing.last_observed_at = Some(incident.observed_at);
+        existing.message = incident.message.clone();
+        existing.kind = incident.kind.clone();
+        existing.normalized_failure = incident.normalized_failure.clone();
+        existing.evidence.extend(incident.evidence.clone());
+        if existing.evidence.len() > 20 {
+            existing.evidence.drain(..existing.evidence.len() - 20);
+        }
+        fs::write(&path, serde_json::to_vec_pretty(&existing)?).await?;
+        return Ok((path, false));
+    }
+    let mut incident = incident.clone();
+    incident.group_key = group_key;
+    incident.occurrence_count = 1;
+    incident.first_observed_at = Some(incident.observed_at);
+    incident.last_observed_at = Some(incident.observed_at);
     let destination = dir.join(format!("{}.json", incident.id));
     let mut file = match fs::OpenOptions::new()
         .write(true)
@@ -511,7 +718,7 @@ async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool
         Err(error) => return Err(error.into()),
     };
     use tokio::io::AsyncWriteExt;
-    file.write_all(&serde_json::to_vec_pretty(incident)?)
+    file.write_all(&serde_json::to_vec_pretty(&incident)?)
         .await?;
     let entry = rescueloop_ledger::append(
         &ledger_path(dir),
@@ -530,6 +737,23 @@ async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool
     Ok((destination, true))
 }
 
+fn incident_group_key(incident: &Incident) -> String {
+    for evidence in &incident.evidence {
+        let engine = evidence
+            .fields
+            .get("engine")
+            .and_then(|value| value.as_str());
+        let container = evidence
+            .fields
+            .get("container_id")
+            .and_then(|value| value.as_str());
+        if let (Some(engine), Some(container)) = (engine, container) {
+            return format!("container:{engine}:{container}");
+        }
+    }
+    incident.fingerprint()
+}
+
 fn ledger_path(incident_dir: &Path) -> PathBuf {
     incident_dir
         .parent()
@@ -538,15 +762,30 @@ fn ledger_path(incident_dir: &Path) -> PathBuf {
 }
 
 pub(crate) async fn dismiss_incident(incident_dir: &Path, incident: &Incident) -> Result<()> {
+    record_incident_status(
+        incident_dir,
+        incident,
+        rescueloop_core::IncidentStatus::Superseded,
+        Some(serde_json::json!({"dismissed_by_user": true})),
+    )
+    .await
+}
+
+pub(crate) async fn record_incident_status(
+    incident_dir: &Path,
+    incident: &Incident,
+    status: rescueloop_core::IncidentStatus,
+    detail: Option<serde_json::Value>,
+) -> Result<()> {
     rescueloop_ledger::append(
         &ledger_path(incident_dir),
         rescueloop_ledger::NewLedgerEntry {
             incident: incident.clone(),
             repair: None,
             before_state: None,
-            after_state: Some(serde_json::json!({"dismissed_by_user": true})),
+            after_state: detail,
             verifier: None,
-            status: rescueloop_core::IncidentStatus::Superseded,
+            status,
             relation_override: None,
         },
     )
@@ -556,8 +795,9 @@ pub(crate) async fn dismiss_incident(incident_dir: &Path, incident: &Incident) -
 
 async fn watch(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).await?;
-    let mut collector = rescueloop_platform::system_collector()?;
-    info!(collector = collector.name(), "failure detector started");
+    let settings = load_settings(dir).await?;
+    let sources = rescueloop_platform::event_sources(&settings.enabled_sources)?;
+    let source_names: Vec<_> = sources.iter().map(|source| source.name()).collect();
     println!("RescueLoop {}", env!("CARGO_PKG_VERSION"));
     println!("Status: READY — monitoring for objective failures");
     println!(
@@ -565,12 +805,35 @@ async fn watch(dir: &Path) -> Result<()> {
         std::env::consts::OS,
         std::env::consts::ARCH
     );
-    println!("Collector: {}", collector.name());
+    println!("Event sources: {}", source_names.join(", "));
     println!("Incidents: {}", dir.display());
     println!("Privacy: local detection only; AI analysis starts only on request");
-    println!("Waiting for a new crash or failure report...\n");
-    loop {
-        let incident = collector.next_incident().await?;
+    println!("Waiting for a new failure event...\n");
+    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    for mut source in sources {
+        let sender = sender.clone();
+        tokio::spawn(async move {
+            info!(source = source.name(), "event source started");
+            let mut retry_delay = Duration::from_secs(2);
+            loop {
+                match source.next_incident().await {
+                    Ok(incident) => {
+                        retry_delay = Duration::from_secs(2);
+                        if sender.send(incident).is_err() {
+                            break;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::warn!(source = source.name(), %error, "event source reconnecting");
+                        tokio::time::sleep(retry_delay).await;
+                        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
+                    }
+                }
+            }
+        });
+    }
+    drop(sender);
+    while let Some(incident) = events.recv().await {
         let (destination, created) = save_incident(dir, &incident).await?;
         if !created {
             continue;
@@ -582,6 +845,7 @@ async fn watch(dir: &Path) -> Result<()> {
             destination.display()
         );
     }
+    anyhow::bail!("all event sources stopped")
 }
 
 async fn run_supervised(
@@ -646,28 +910,16 @@ pub(crate) async fn analyze_with_provider(
     provider: &dyn AnalysisProvider,
     output: Option<&Path>,
 ) -> Result<rescueloop_core::AnalysisResponse> {
-    let mut incident: Incident =
+    let incident: Incident =
         serde_json::from_slice(&fs::read(path).await.context("cannot read incident")?)
             .context("invalid incident JSON")?;
-    // Local artifact locations may contain usernames or private directory names.
-    // The allowlisted diagnostic metadata is enough for the provider contract.
-    for evidence in &mut incident.evidence {
-        evidence.artifact = None;
-    }
-    if let Some(context) = &mut incident.launch_context {
-        context.arguments = None;
-        context.working_directory = None;
-        context.executable = context
-            .executable
-            .file_name()
-            .map(PathBuf::from)
-            .unwrap_or_default();
-    }
-    let request = AnalysisRequest {
-        schema_version: 1,
-        incident,
-        allowed_actions: ALLOWED_ACTIONS.iter().map(|x| x.to_string()).collect(),
-    };
+    let allowed_actions = ALLOWED_ACTIONS
+        .iter()
+        .copied()
+        .filter(|action| cfg!(unix) || *action != "set_permission")
+        .map(str::to_string)
+        .collect();
+    let request = AnalysisRequest::bounded(incident, allowed_actions);
     let response = provider.analyze(&request).await?;
     if let Some(output) = output {
         fs::write(output, serde_json::to_vec_pretty(&response)?).await?;
@@ -690,7 +942,92 @@ pub(crate) async fn repair(
         .proposed_actions
         .get(action_index)
         .context("action index is out of range")?;
+    if let Some(action) = rescueloop_repair::compile_operational(proposal)? {
+        println!("DRY RUN: {}", serde_json::to_string_pretty(&action)?);
+        if !approved {
+            println!("No changes made. Approve this exact operational target to execute.");
+            return Ok(());
+        }
+        let target_id = match &action {
+            rescueloop_repair::OperationalAction::RestartContainer { container_id, .. } => {
+                container_id.clone()
+            }
+            rescueloop_repair::OperationalAction::RestartService { service_id } => {
+                service_id.clone()
+            }
+        };
+        let evidenced = incident.evidence.iter().any(|evidence| {
+            evidence
+                .fields
+                .values()
+                .any(|value| value.as_str() == Some(target_id.as_str()))
+        });
+        if !evidenced {
+            anyhow::bail!("operational target is not present in incident evidence")
+        }
+        record_incident_status(
+            incident_dir,
+            &incident,
+            rescueloop_core::IncidentStatus::RepairApplied,
+            None,
+        )
+        .await?;
+        let receipt = rescueloop_repair::execute_operational(action, &target_id).await?;
+        record_incident_status(
+            incident_dir,
+            &incident,
+            rescueloop_core::IncidentStatus::VerificationPending,
+            None,
+        )
+        .await?;
+        let transaction_root = incident_dir
+            .parent()
+            .unwrap_or(incident_dir)
+            .join("transactions")
+            .join(receipt.id.to_string());
+        fs::create_dir_all(&transaction_root).await?;
+        let receipt_path = transaction_root.join("operational-receipt.json");
+        fs::write(&receipt_path, serde_json::to_vec_pretty(&receipt)?).await?;
+        let status = if receipt.verified {
+            rescueloop_core::IncidentStatus::VerifiedFixed
+        } else {
+            rescueloop_core::IncidentStatus::VerificationFailed
+        };
+        record_incident_status(
+            incident_dir,
+            &incident,
+            status,
+            Some(serde_json::to_value(&receipt)?),
+        )
+        .await?;
+        if !receipt.verified {
+            anyhow::bail!("operational repair failed verification")
+        }
+        println!(
+            "VERIFIED operational repair. Receipt: {}",
+            receipt_path.display()
+        );
+        return Ok(());
+    }
     let plan = rescueloop_repair::compile(proposal)?;
+    let proposed_target = std::fs::canonicalize(plan.action.target()).with_context(|| {
+        format!(
+            "repair target does not exist: {}",
+            plan.action.target().display()
+        )
+    })?;
+    let target_is_evidenced = incident.evidence.iter().any(|evidence| {
+        evidence
+            .artifact
+            .as_ref()
+            .and_then(|path| std::fs::canonicalize(path).ok())
+            .is_some_and(|path| path == proposed_target)
+    });
+    if !target_is_evidenced {
+        anyhow::bail!(
+            "filesystem repair target is not the exact artifact recorded in incident evidence"
+        )
+    }
     let policy = rescueloop_repair::ScopePolicy::new(allowed_roots)?;
     let transaction_root = incident_dir
         .parent()
@@ -707,12 +1044,26 @@ pub(crate) async fn repair(
         .clone()
         .context("verified repair requires an exact recorded launch context")?;
     rescueloop_repair::apply(&mut transaction).await?;
+    record_incident_status(
+        incident_dir,
+        &incident,
+        rescueloop_core::IncidentStatus::RepairApplied,
+        None,
+    )
+    .await?;
     rescueloop_repair::persist(&transaction, &transaction_root).await?;
     println!(
         "APPLIED: backup created at {}",
         transaction.backup.display()
     );
 
+    record_incident_status(
+        incident_dir,
+        &incident,
+        rescueloop_core::IncidentStatus::VerificationPending,
+        None,
+    )
+    .await?;
     let replay = rescueloop_platform::verify_replay(&launch_context).await;
     match replay {
         Ok(result) if result.passed => {

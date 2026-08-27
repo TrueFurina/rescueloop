@@ -17,14 +17,15 @@ not executable code, and only allowlisted reversible repair action types are acc
 - can replay an exact recorded action and reports `VERIFIED` or `NOT FIXED` from its exit status;
 - sends an incident to any HTTP AI adapter implementing the documented JSON contract, only on `analyze`;
 - rejects unknown, incomplete, evidence-invalid, or non-reversible repair action proposals;
-- executes only `quarantine_path` and `regenerate_cache`, behind dry-run, explicit scope and approval;
+- executes typed filesystem, configuration, permission, service and container repairs behind dry-run,
+  exact evidence binding, explicit scope and approval;
 - backs up before mutation, replays the original action, and rolls back when verification fails.
 - appends outcomes to a tamper-evident local lineage ledger and distinguishes lifecycle updates,
   regressions, independent new failures and stale verification after an app/environment change.
 
-This is foundational coverage, not a claim to detect every application-level error. ETW/Event Log,
-Endpoint Security, hang probes, service/installer failures, desktop UI, more repair primitives and
-richer ready-state verification are subsequent milestones.
+This is foundational coverage, not a claim to detect every application-level error. Native crash
+artifacts, container engines, macOS Unified Log and Windows Event Log are connected; deeper ETW,
+Endpoint Security and application-specific health probes remain future integrations.
 
 The background collector is event-driven rather than polling. See the explicit
 [performance budget](docs/performance-budget.md).
@@ -35,21 +36,75 @@ The background collector is event-driven rather than polling. See the explicit
 cargo run -p rescueloop -- watch
 ```
 
+`watch` runs a shared event-source runtime. Sources are enabled by default and can be managed with
+`rescueloop sources list|enable|disable`. Docker/Podman streams activate when their CLIs are installed. Container
+`die`, `oom`, and unhealthy events are normalized without polling; repeated failures are classified
+as restart loops. When an engine is temporarily unavailable, its source reconnects with bounded
+exponential backoff without stopping the other sources.
+
+System service/resource failures use Windows Event Log subscriptions. macOS Unified Log support is
+enabled only for an authorized root daemon because current macOS versions reject `log stream` for a
+normal user LaunchAgent; the default user watcher never retries this unavailable source.
+
+## Install and first-time setup
+
+Release installers download over HTTPS and verify the selected archive against `SHA256SUMS` before
+changing the user PATH:
+
+```sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/ostapondo/rescueloop/main/scripts/install.sh | sh
+rescueloop setup
+```
+
+On Windows PowerShell, download and review `scripts/install.ps1`, then run it. Release artifacts also
+include a macOS `.pkg`, Windows `.msi`, a Homebrew formula template, and WinGet manifests.
+
+`rescueloop setup` performs explicit AI selection, Event Source selection, user PATH installation,
+storage initialization and optional login-daemon installation. Afterwards, `rescueloop` with no
+subcommand opens the TUI.
+
+For a source build, install the watcher for the current user so it starts at login:
+
+```sh
+cargo build --release -p rescueloop
+target/release/rescueloop service install
+target/release/rescueloop service status
+```
+
+Use `rescueloop service uninstall` to remove the launch agent or scheduled task.
+
+On macOS, Unified Log streaming requires an explicitly privileged system daemon. Install that mode
+only when system service/resource diagnostics are required:
+
+```sh
+sudo target/release/rescueloop service install-system
+sudo target/release/rescueloop service uninstall-system
+```
+
 In another terminal, connect an interactive console to the background watcher:
 
 ```sh
-cargo run -p rescueloop -- console
+rescueloop
 ```
 
 On first launch the console detects supported local AI CLIs and asks which one should handle
 diagnosis. Setup can also be rerun explicitly:
 
 ```sh
-cargo run -p rescueloop -- setup
+rescueloop setup
 ```
 
 The current adapters detect Codex CLI and Claude Code. The selected executable and agent kind are
-stored locally in `.rescueloop/config.json`; no API keys are copied into this file.
+stored locally in `.rescueloop/config.json`; no API keys are copied into this file. Event Source
+preferences are stored in `.rescueloop/settings.json`.
+
+```sh
+rescueloop sources list
+rescueloop sources disable containers
+rescueloop sources enable containers
+rescueloop service install
+rescueloop service status
+```
 
 The default console is a full-screen terminal UI. Use `↑`/`↓` (or `j`/`k`) to select an incident,
 `Enter` to open its evidence, `a` to request AI analysis, `y` to grant consent, `r` to review the
@@ -66,6 +121,16 @@ cargo run -p rescueloop -- console --plain
 The plain console supports `incidents`, `details <n>`, `analyze <n>`, `replay <n>`, and `quit`.
 Artifact-derived incident IDs are deterministic and written atomically, so concurrent watchers
 cannot add the same crash report twice.
+
+Equivalent active failures are grouped by their stable fingerprint. The console shows one row with
+an occurrence count and first/last observation timestamps instead of duplicating every recurrence.
+
+AI receives a bounded evidence packet rather than the raw incident: local artifact paths and launch
+arguments are removed, fields are allowlisted, diagnostic lines are capped, and completeness plus
+missing-evidence metadata is included. Typed repairs currently cover quarantine, cache regeneration,
+JSON config patching, POSIX permissions, exact service restart, and exact Docker/Podman container
+restart. File/config/permission changes record rollback state; operational repairs require an exact
+identity from evidence and write a verification receipt.
 
 Observe a command and optionally retain its arguments for exact replay:
 
@@ -102,9 +167,10 @@ cargo run -p rescueloop -- repair \
   --approve
 ```
 
-The target must already exist, must be a strict descendant of `--allow-root`, and cannot be a
-symbolic link. Filesystem roots are rejected. The repair is also rejected when the incident has no
-exact replay context. Transaction records and backups are stored under `.rescueloop/transactions`.
+The target must already exist, must exactly match an artifact recorded in the incident evidence,
+must be a strict descendant of `--allow-root`, and cannot be a symbolic link. Filesystem roots are
+rejected. The repair is also rejected when the incident has no exact replay context. Transaction
+records and backups are stored under `.rescueloop/transactions`.
 Lineage is stored as append-only JSONL in `.rescueloop/repair-ledger.jsonl`; its hash chain is
 verified whenever it is loaded.
 
@@ -123,3 +189,13 @@ to any provider.
 - A repair is accepted only when exact replay succeeds; otherwise RescueLoop restores the backup.
 - If a regenerated cache becomes non-empty during a failed replay, rollback refuses to delete it and
   reports a critical condition instead of risking new user data.
+
+## Releases, updates and signing
+
+Tagging `v*` runs the release workflow for macOS arm64/x86_64 and Windows x86_64, produces archives,
+`.pkg`, `.msi`, and checksums, and publishes them to GitHub Releases. The installers use the verified
+`latest` channel by default or a version selected with `RESCUELOOP_VERSION`.
+
+The workflow signs macOS and Windows binaries when publisher certificates are configured. Public
+signing and Apple notarization require external credentials and cannot be completed from source code
+alone. See [release documentation](docs/releasing.md).

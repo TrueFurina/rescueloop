@@ -1,0 +1,106 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version used for a non-publishing packaging test
+        default: "0.1.0"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-14, target: aarch64-apple-darwin, asset: rescueloop-macos-aarch64 }
+          - { os: macos-13, target: x86_64-apple-darwin, asset: rescueloop-macos-x86_64 }
+          - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: rescueloop-windows-x86_64 }
+    runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_VERSION: ${{ inputs.version || github.ref_name }}
+      APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+      APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+      APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+      APPLE_INSTALLER_IDENTITY: ${{ secrets.APPLE_INSTALLER_IDENTITY }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+      WINDOWS_CERTIFICATE_PFX: ${{ secrets.WINDOWS_CERTIFICATE_PFX }}
+      WINDOWS_CERTIFICATE_PASSWORD: ${{ secrets.WINDOWS_CERTIFICATE_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo build --release --locked --target ${{ matrix.target }} -p rescueloop
+      - name: Sign macOS binary
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
+        shell: bash
+        run: |
+          echo "$APPLE_CERTIFICATE_P12" | base64 --decode > "$RUNNER_TEMP/certificate.p12"
+          security create-keychain -p temporary "$RUNNER_TEMP/rescueloop.keychain"
+          security import "$RUNNER_TEMP/certificate.p12" -k "$RUNNER_TEMP/rescueloop.keychain" -P "$APPLE_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+          security list-keychains -d user -s "$RUNNER_TEMP/rescueloop.keychain"
+          security unlock-keychain -p temporary "$RUNNER_TEMP/rescueloop.keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k temporary "$RUNNER_TEMP/rescueloop.keychain"
+          codesign --force --options runtime --timestamp --sign "$APPLE_SIGNING_IDENTITY" "target/${{ matrix.target }}/release/rescueloop"
+      - name: Sign Windows binary
+        if: runner.os == 'Windows' && env.WINDOWS_CERTIFICATE_PFX != ''
+        shell: pwsh
+        run: |
+          [IO.File]::WriteAllBytes("$env:RUNNER_TEMP\certificate.pfx", [Convert]::FromBase64String($env:WINDOWS_CERTIFICATE_PFX))
+          signtool sign /fd SHA256 /tr http://timestamp.digicert.com /td SHA256 /f "$env:RUNNER_TEMP\certificate.pfx" /p "$env:WINDOWS_CERTIFICATE_PASSWORD" "target\${{ matrix.target }}\release\rescueloop.exe"
+      - name: Package macOS
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          mkdir -p package/usr/local/bin
+          cp "target/${{ matrix.target }}/release/rescueloop" package/usr/local/bin/rescueloop
+          tar -C package/usr/local/bin -czf "${{ matrix.asset }}.tar.gz" rescueloop
+          pkgbuild --root package --identifier dev.rescueloop.cli --version "${RELEASE_VERSION#v}" "${{ matrix.asset }}.pkg"
+      - name: Sign and notarize macOS pkg
+        if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != '' && env.APPLE_ID != ''
+        shell: bash
+        run: |
+          productsign --sign "$APPLE_INSTALLER_IDENTITY" "${{ matrix.asset }}.pkg" "${{ matrix.asset }}-signed.pkg"
+          mv "${{ matrix.asset }}-signed.pkg" "${{ matrix.asset }}.pkg"
+          xcrun notarytool submit "${{ matrix.asset }}.pkg" --apple-id "$APPLE_ID" --team-id "$APPLE_TEAM_ID" --password "$APPLE_APP_PASSWORD" --wait
+          xcrun stapler staple "${{ matrix.asset }}.pkg"
+      - name: Package Windows
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          Copy-Item "target\${{ matrix.target }}\release\rescueloop.exe" .
+          Compress-Archive rescueloop.exe "${{ matrix.asset }}.zip"
+          dotnet tool install --global wix
+          wix build packaging/windows/Product.wxs -d "Version=$($env:RELEASE_VERSION.TrimStart('v'))" -d "BinaryPath=$pwd\rescueloop.exe" -o "${{ matrix.asset }}.msi"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: |
+            ${{ matrix.asset }}.tar.gz
+            ${{ matrix.asset }}.pkg
+            ${{ matrix.asset }}.zip
+            ${{ matrix.asset }}.msi
+          if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: sha256sum rescueloop-* > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            rescueloop-*
+            SHA256SUMS

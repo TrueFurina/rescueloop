@@ -1,0 +1,20 @@
+name: Soak
+
+on:
+  workflow_dispatch:
+    inputs:
+      duration_seconds:
+        description: Soak duration in seconds
+        default: "86400"
+  schedule:
+    - cron: "17 2 * * 0"
+
+jobs:
+  macos:
+    runs-on: macos-14
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p rescueloop
+      - run: ./scripts/soak.sh "${{ inputs.duration_seconds || '86400' }}"

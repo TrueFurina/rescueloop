@@ -12,6 +12,10 @@ is a release gate, not an architectural assumption.
 - AI analysis, hashing, repair planning and verification run only after an incident or explicit user
   action; none run during idle.
 - Duplicate artifacts use deterministic IDs and atomic creation.
+- Docker waits for native socket-creation events when the engine is offline; it does not spawn the
+  CLI on a timer. A connected engine uses one blocking event stream.
+- macOS Unified Log is activated only in an authorized root daemon context. A normal user agent
+  does not retry a source it cannot access.
 
 ## Budgets
 
@@ -25,9 +29,19 @@ Every future flight-recorder source must document its sampling/event strategy an
 idle benchmark on supported Windows and macOS versions. The AI CLI runs as a separate on-demand
 process and is measured separately from the background detector.
 
-## Development smoke result
+Run the repeatable release gate with:
+
+```sh
+cargo build --release -p rescueloop
+scripts/benchmark-idle.sh 1800
+```
+
+## Measured results
 
 On macOS arm64, an unoptimized development build using the event-driven DiagnosticReports collector
 showed `0.0%` idle CPU and approximately `3 MiB` RSS in a short three-sample `top` check. This is not
 a substitute for the release benchmark.
 
+On macOS arm64, the optimized multi-source watcher with DiagnosticReports enabled and Docker
+installed but offline measured `0.0%` CPU in 10/10 one-second samples, approximately 9.3 MiB RSS,
+and zero child processes. Docker socket discovery was event-driven during this measurement.
