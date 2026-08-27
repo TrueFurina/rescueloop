@@ -1532,6 +1532,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "chrono",
+ "fs2",
  "rescueloop-core",
  "serde",
  "serde_json",

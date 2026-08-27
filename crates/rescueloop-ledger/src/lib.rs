@@ -1,11 +1,15 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
+use fs2::FileExt;
 use rescueloop_core::{Incident, IncidentStatus};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::path::Path;
-use tokio::{fs, io::AsyncWriteExt};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{BufReader, Read, Write},
+    path::Path,
+};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -56,10 +60,11 @@ pub struct LedgerEntry {
 
 #[tracing::instrument(name = "ledger.load", skip_all, err)]
 pub async fn load(path: &Path) -> Result<Vec<LedgerEntry>> {
-    if !fs::try_exists(path).await? {
-        return Ok(Vec::new());
-    }
-    let content = fs::read_to_string(path).await?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || load_locked(&path)).await?
+}
+
+fn parse_entries(content: &str) -> Result<Vec<LedgerEntry>> {
     let mut entries = Vec::new();
     let mut previous: Option<String> = None;
     for (index, line) in content
@@ -88,7 +93,45 @@ pub async fn load(path: &Path) -> Result<Vec<LedgerEntry>> {
     err
 )]
 pub async fn append(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
-    let prior = load(path).await?;
+    let path = path.to_path_buf();
+    tokio::task::spawn_blocking(move || append_locked(&path, new)).await?
+}
+
+fn load_locked(path: &Path) -> Result<Vec<LedgerEntry>> {
+    let Some(file) = open_existing(path)? else {
+        return Ok(Vec::new());
+    };
+    file.lock_shared()?;
+    let result = read_entries(&file);
+    FileExt::unlock(&file)?;
+    result
+}
+
+fn open_existing(path: &Path) -> Result<Option<File>> {
+    match OpenOptions::new().read(true).write(true).open(path) {
+        Ok(file) => Ok(Some(file)),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn read_entries(file: &File) -> Result<Vec<LedgerEntry>> {
+    let mut content = String::new();
+    BufReader::new(file.try_clone()?).read_to_string(&mut content)?;
+    parse_entries(&content)
+}
+
+fn append_locked(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
+    let parent = path.parent().unwrap_or(Path::new("."));
+    fs::create_dir_all(parent)?;
+    let existed = path.exists();
+    let mut file = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .append(true)
+        .open(path)?;
+    file.lock_exclusive()?;
+    let prior = read_entries(&file)?;
     let (relation, related_entry) = classify(&prior, &new);
     let mut entry = LedgerEntry {
         schema_version: 1,
@@ -115,18 +158,26 @@ pub async fn append(path: &Path, new: NewLedgerEntry) -> Result<LedgerEntry> {
         entry_hash: String::new(),
     };
     entry.entry_hash = calculate_hash(&entry)?;
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).await?;
+    let mut encoded = serde_json::to_vec(&entry)?;
+    encoded.push(b'\n');
+    file.write_all(&encoded)?;
+    file.sync_data()?;
+    FileExt::unlock(&file)?;
+    if !existed {
+        sync_directory(parent)?;
     }
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
-        .await?;
-    file.write_all(&serde_json::to_vec(&entry)?).await?;
-    file.write_all(b"\n").await?;
-    file.flush().await?;
     Ok(entry)
+}
+
+#[cfg(unix)]
+fn sync_directory(path: &Path) -> Result<()> {
+    File::open(path)?.sync_all()?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn sync_directory(_path: &Path) -> Result<()> {
+    Ok(())
 }
 
 fn classify(prior: &[LedgerEntry], new: &NewLedgerEntry) -> (CausalRelation, Option<Uuid>) {
@@ -293,10 +344,40 @@ mod tests {
         .await
         .unwrap();
         let content = fs::read_to_string(&path)
-            .await
             .unwrap()
             .replace("verified_fixed", "rolled_back");
-        fs::write(&path, content).await.unwrap();
+        fs::write(&path, content).unwrap();
         assert!(load(&path).await.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn serializes_concurrent_process_style_appends() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        let tasks = (0..32)
+            .map(|index| {
+                let path = path.clone();
+                tokio::spawn(async move {
+                    append(
+                        &path,
+                        new(
+                            incident(&format!("failure-{index}"), "1"),
+                            IncidentStatus::Detected,
+                        ),
+                    )
+                    .await
+                })
+            })
+            .collect::<Vec<_>>();
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
+        let entries = load(&path).await.unwrap();
+        assert_eq!(entries.len(), 32);
+        assert!(
+            entries.windows(2).all(|pair| {
+                pair[1].previous_hash.as_deref() == Some(pair[0].entry_hash.as_str())
+            })
+        );
     }
 }

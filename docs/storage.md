@@ -8,6 +8,10 @@ Versioned JSON documents under `incidents/`, `occurrences/`, `analyses/`, and `t
 repair ledger, are durable. A release must continue reading older supported document versions and
 must not rewrite all documents during an ordinary update.
 
+Ledger readers take a shared file lock and appenders take an exclusive cross-process lock. Each
+encoded entry, newline and hash-chain link is written as one locked append and synced before the
+lock is released, preventing concurrent watcher/CLI processes from forking the chain.
+
 Every normalized event is first persisted as an immutable occurrence using `create_new`. The grouped
 incident document is a compact UI projection that may advance its occurrence count and last-seen time;
 the original evidence remains recoverable from occurrence documents.
