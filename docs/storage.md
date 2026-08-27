@@ -25,6 +25,8 @@ Rules:
 - a broken index is renamed with a `corrupt-*` suffix and rebuilt;
 - directory modification checkpoints detect JSON created while an index update was interrupted;
 - direct JSON reading remains the fallback when indexing is unavailable;
+- recurring observations use the indexed `group_key` path and validate only matching JSON
+  projections; legacy documents without a stored key receive one compatibility scan;
 - rebuild uses a temporary database and installs it only after a successful transaction.
 
 This design gives SQLite query performance without making recovery or downgrade depend on SQLite.

@@ -62,6 +62,26 @@ impl IncidentIndex {
         .await?
     }
 
+    /// Returns only projections that share a stable grouping key. Callers still
+    /// validate the JSON source of truth and ledger status before mutating it.
+    pub async fn paths_for_group(&self, group_key: &str) -> Result<Vec<PathBuf>> {
+        let path = self.path.clone();
+        let incident_dir = self.incident_dir.clone();
+        let group_key = group_key.to_owned();
+        tokio::task::spawn_blocking(move || {
+            open_or_rebuild(&path, &incident_dir)?;
+            let connection = open_connection(&path)?;
+            let mut query = connection.prepare(
+                "SELECT json_path FROM incidents
+                 WHERE group_key = ?1
+                 ORDER BY last_observed_at DESC, observed_at DESC",
+            )?;
+            let rows = query.query_map([group_key], |row| row.get::<_, String>(0))?;
+            Ok::<_, anyhow::Error>(rows.flatten().map(PathBuf::from).collect())
+        })
+        .await?
+    }
+
     #[tracing::instrument(name = "index.rebuild", skip(self), err)]
     pub async fn rebuild(&self) -> Result<usize> {
         let path = self.path.clone();
@@ -350,5 +370,21 @@ mod tests {
         std::fs::write(&future, b"future schema sentinel").unwrap();
         IncidentIndex::open(temp.path(), &incidents).await.unwrap();
         assert_eq!(std::fs::read(future).unwrap(), b"future schema sentinel");
+    }
+
+    #[tokio::test]
+    async fn selects_only_matching_group_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let incidents = temp.path().join("incidents");
+        let first = incident("first");
+        let first_path = write_incident(&incidents, &first);
+        write_incident(&incidents, &incident("second"));
+        let index = IncidentIndex::open(temp.path(), &incidents).await.unwrap();
+
+        assert_eq!(
+            index.paths_for_group("first").await.unwrap(),
+            vec![first_path]
+        );
+        assert!(index.paths_for_group("missing").await.unwrap().is_empty());
     }
 }
