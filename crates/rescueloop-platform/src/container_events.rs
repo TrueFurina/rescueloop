@@ -7,16 +7,21 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::{
     collections::{BTreeMap, HashMap, VecDeque},
+    io,
     path::PathBuf,
     process::Stdio,
     time::{Duration, Instant},
 };
 use tokio::{
-    io::{AsyncBufReadExt, BufReader, Lines},
+    io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncReadExt, BufReader},
     process::{Child, ChildStdout, Command},
 };
 
 const FAILURE_ACTIONS: &[&str] = &["die", "oom", "health_status: unhealthy"];
+const MAX_EVENT_BYTES: usize = 64 * 1024;
+const MAX_COMMAND_OUTPUT_BYTES: usize = 256 * 1024;
+const MAX_TRACKED_CONTAINERS: usize = 4_096;
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 pub fn available_sources() -> Vec<Box<dyn IncidentCollector>> {
     ["docker", "podman"]
@@ -42,7 +47,7 @@ fn executable_exists(name: &str) -> bool {
 pub struct ContainerEventSource {
     engine: &'static str,
     process: Option<Child>,
-    lines: Option<Lines<BufReader<ChildStdout>>>,
+    events: Option<BufReader<ChildStdout>>,
     failures: HashMap<String, VecDeque<Instant>>,
 }
 
@@ -51,7 +56,7 @@ impl ContainerEventSource {
         Self {
             engine,
             process: None,
-            lines: None,
+            events: None,
             failures: HashMap::new(),
         }
     }
@@ -76,7 +81,7 @@ impl ContainerEventSource {
             .stdout
             .take()
             .context("container event stream has no stdout")?;
-        self.lines = Some(BufReader::new(stdout).lines());
+        self.events = Some(BufReader::new(stdout));
         self.process = Some(child);
         Ok(())
     }
@@ -96,11 +101,11 @@ impl ContainerEventSource {
         if candidates.iter().any(|path| path.exists()) {
             return Ok(());
         }
-        let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+        let (sender, mut events) = tokio::sync::mpsc::channel(1);
         let mut watcher =
             notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
                 if event.is_ok() {
-                    let _ = sender.send(());
+                    let _ = sender.try_send(());
                 }
             })?;
         for parent in candidates.iter().filter_map(|path| path.parent()) {
@@ -122,11 +127,7 @@ impl ContainerEventSource {
     }
 
     async fn inspect(&self, id: &str) -> Option<Value> {
-        let output = Command::new(self.engine)
-            .args(["inspect", id])
-            .stdin(Stdio::null())
-            .stderr(Stdio::null())
-            .output()
+        let output = bounded_command(self.engine, &["inspect", "--", id])
             .await
             .ok()?;
         if !output.status.success() {
@@ -139,11 +140,7 @@ impl ContainerEventSource {
     }
 
     async fn diagnostic_logs(&self, id: &str) -> Vec<String> {
-        let Ok(output) = Command::new(self.engine)
-            .args(["logs", "--tail", "100", id])
-            .stdin(Stdio::null())
-            .output()
-            .await
+        let Ok(output) = bounded_command(self.engine, &["logs", "--tail", "100", "--", id]).await
         else {
             return Vec::new();
         };
@@ -152,16 +149,153 @@ impl ContainerEventSource {
 
     fn record_failure(&mut self, id: &str) -> bool {
         let now = Instant::now();
+        for window in self.failures.values_mut() {
+            prune_window(window, now);
+        }
+        self.failures.retain(|_, window| !window.is_empty());
+        if self.failures.len() >= MAX_TRACKED_CONTAINERS
+            && !self.failures.contains_key(id)
+            && let Some(oldest) = self
+                .failures
+                .iter()
+                .min_by_key(|(_, window)| window.back().copied())
+                .map(|(id, _)| id.clone())
+        {
+            self.failures.remove(&oldest);
+        }
         let window = self.failures.entry(id.to_string()).or_default();
         window.push_back(now);
-        while window
-            .front()
-            .is_some_and(|instant| now.duration_since(*instant) > Duration::from_secs(60))
-        {
-            window.pop_front();
-        }
+        prune_window(window, now);
         window.len() >= 3
     }
+}
+
+fn prune_window(window: &mut VecDeque<Instant>, now: Instant) {
+    while window
+        .front()
+        .is_some_and(|instant| now.duration_since(*instant) > Duration::from_secs(60))
+    {
+        window.pop_front();
+    }
+}
+
+struct CommandOutput {
+    status: std::process::ExitStatus,
+    stdout: Vec<u8>,
+    stderr: Vec<u8>,
+}
+
+async fn bounded_command(engine: &str, arguments: &[&str]) -> Result<CommandOutput> {
+    bounded_command_with_timeout(engine, arguments, COMMAND_TIMEOUT).await
+}
+
+async fn bounded_command_with_timeout(
+    engine: &str,
+    arguments: &[&str],
+    timeout: Duration,
+) -> Result<CommandOutput> {
+    let mut command = Command::new(engine);
+    command
+        .args(arguments)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.process_group(0);
+    let mut child = command.spawn()?;
+    let stdout = child
+        .stdout
+        .take()
+        .context("container command has no stdout")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("container command has no stderr")?;
+    let stdout = tokio::spawn(read_bounded(stdout, MAX_COMMAND_OUTPUT_BYTES));
+    let stderr = tokio::spawn(read_bounded(stderr, MAX_COMMAND_OUTPUT_BYTES));
+    let status = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(status) => status?,
+        Err(_) => {
+            terminate_child(&mut child).await;
+            let _ = child.wait().await;
+            let _ = stdout.await;
+            let _ = stderr.await;
+            bail!("container command timed out")
+        }
+    };
+    Ok(CommandOutput {
+        status,
+        stdout: stdout.await.context("container stdout reader stopped")??,
+        stderr: stderr.await.context("container stderr reader stopped")??,
+    })
+}
+
+async fn terminate_child(child: &mut Child) {
+    #[cfg(unix)]
+    if let Some(pid) = child.id() {
+        let _ = unsafe { libc::kill(-(pid as i32), libc::SIGKILL) };
+        return;
+    }
+    let _ = child.kill().await;
+}
+
+async fn read_bounded(mut reader: impl AsyncRead + Unpin, limit: usize) -> io::Result<Vec<u8>> {
+    let mut retained = Vec::with_capacity(limit.min(8 * 1024));
+    let mut buffer = [0_u8; 8 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).await?;
+        if read == 0 {
+            break;
+        }
+        let remaining = limit.saturating_sub(retained.len());
+        retained.extend_from_slice(&buffer[..read.min(remaining)]);
+    }
+    Ok(retained)
+}
+
+enum EventLine {
+    Line(Vec<u8>),
+    Oversized,
+    End,
+}
+
+async fn read_event_line(reader: &mut (impl AsyncBufRead + Unpin)) -> io::Result<EventLine> {
+    let mut retained = Vec::with_capacity(1024);
+    let mut oversized = false;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return if retained.is_empty() {
+                Ok(EventLine::End)
+            } else if oversized {
+                Ok(EventLine::Oversized)
+            } else {
+                Ok(EventLine::Line(retained))
+            };
+        }
+        let newline = available.iter().position(|byte| *byte == b'\n');
+        let consumed = newline.map_or(available.len(), |index| index + 1);
+        let content = newline.map_or(available, |index| &available[..index]);
+        let remaining = MAX_EVENT_BYTES.saturating_sub(retained.len());
+        retained.extend_from_slice(&content[..content.len().min(remaining)]);
+        oversized |= content.len() > remaining;
+        reader.consume(consumed);
+        if newline.is_some() {
+            if retained.last() == Some(&b'\r') {
+                retained.pop();
+            }
+            return if oversized {
+                Ok(EventLine::Oversized)
+            } else {
+                Ok(EventLine::Line(retained))
+            };
+        }
+    }
+}
+
+fn valid_container_id(id: &str) -> bool {
+    !id.is_empty() && id.len() <= 128 && id.bytes().all(|byte| byte.is_ascii_alphanumeric())
 }
 
 #[derive(Debug, Deserialize)]
@@ -189,22 +323,26 @@ impl IncidentCollector for ContainerEventSource {
     }
 
     async fn next_incident(&mut self) -> Result<Incident> {
-        if self.lines.is_none() {
+        if self.events.is_none() {
             self.connect().await?;
         }
         loop {
-            let line = self
-                .lines
-                .as_mut()
-                .context("container event source disconnected")?
-                .next_line()
-                .await?;
-            let Some(line) = line else {
-                self.lines = None;
-                self.process = None;
-                bail!("{} event stream closed", self.engine)
+            let line = read_event_line(
+                self.events
+                    .as_mut()
+                    .context("container event source disconnected")?,
+            )
+            .await?;
+            let line = match line {
+                EventLine::Line(line) => line,
+                EventLine::Oversized => continue,
+                EventLine::End => {
+                    self.events = None;
+                    self.process = None;
+                    bail!("{} event stream closed", self.engine)
+                }
             };
-            let Ok(event) = serde_json::from_str::<EngineEvent>(&line) else {
+            let Ok(event) = serde_json::from_slice::<EngineEvent>(&line) else {
                 continue;
             };
             if !FAILURE_ACTIONS.contains(&event.action.as_str()) {
@@ -215,6 +353,9 @@ impl IncidentCollector for ContainerEventSource {
             } else {
                 event.actor.id.as_str()
             };
+            if !valid_container_id(id) {
+                continue;
+            }
             let restart_loop = self.record_failure(id);
             let inspect = self.inspect(id).await;
             let logs = self.diagnostic_logs(id).await;
@@ -356,5 +497,69 @@ mod tests {
     fn retains_only_diagnostic_container_logs() {
         let lines = diagnostic_log_lines(b"ready\nconnection refused\nrequest complete\n");
         assert_eq!(lines, vec!["connection refused"]);
+    }
+
+    #[test]
+    fn bounds_restart_history_and_rejects_option_injection() {
+        let mut source = ContainerEventSource::new("docker");
+        for index in 0..MAX_TRACKED_CONTAINERS + 100 {
+            source.record_failure(&format!("container{index}"));
+        }
+        assert_eq!(source.failures.len(), MAX_TRACKED_CONTAINERS);
+        assert!(valid_container_id("a1B2c3"));
+        assert!(!valid_container_id("--all"));
+        assert!(!valid_container_id(""));
+    }
+
+    #[tokio::test]
+    async fn bounds_command_output_while_draining_the_stream() {
+        let (mut writer, reader) = tokio::io::duplex(1024);
+        let write = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer.write_all(&vec![b'x'; 32 * 1024]).await.unwrap();
+        });
+        let retained = read_bounded(reader, 4096).await.unwrap();
+        write.await.unwrap();
+        assert_eq!(retained.len(), 4096);
+    }
+
+    #[tokio::test]
+    async fn discards_oversized_event_and_resynchronizes_at_newline() {
+        let (mut writer, reader) = tokio::io::duplex(MAX_EVENT_BYTES * 2);
+        let write = tokio::spawn(async move {
+            use tokio::io::AsyncWriteExt;
+            writer
+                .write_all(&vec![b'x'; MAX_EVENT_BYTES + 1])
+                .await
+                .unwrap();
+            writer.write_all(b"\n{}\n").await.unwrap();
+        });
+        let mut reader = BufReader::new(reader);
+        assert!(matches!(
+            read_event_line(&mut reader).await.unwrap(),
+            EventLine::Oversized
+        ));
+        assert!(matches!(
+            read_event_line(&mut reader).await.unwrap(),
+            EventLine::Line(line) if line == b"{}"
+        ));
+        write.await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn kills_a_hung_container_command_at_the_deadline() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let script = std::env::temp_dir().join(format!("rescueloop-hung-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&script, b"#!/bin/sh\nsleep 10\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let started = Instant::now();
+        let result =
+            bounded_command_with_timeout(script.to_str().unwrap(), &[], Duration::from_millis(50))
+                .await;
+        assert!(result.is_err());
+        assert!(started.elapsed() < Duration::from_secs(1));
+        std::fs::remove_file(script).unwrap();
     }
 }

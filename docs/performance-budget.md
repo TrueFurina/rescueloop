@@ -22,6 +22,10 @@ is a release gate, not an architectural assumption.
 - Duplicate artifacts use deterministic IDs and atomic creation.
 - Docker waits for native socket-creation events when the engine is offline; it does not spawn the
   CLI on a timer. A connected engine uses one blocking event stream.
+- Container event records are capped at 64 KiB and oversized lines are drained through the next
+  newline. `inspect` and diagnostic-log output are drained but retain at most 256 KiB each, with a
+  five-second deadline and process-group termination on Unix. Restart history retains at most 4,096
+  active container IDs and expires inactive windows after 60 seconds.
 - macOS Unified Log is activated only in an authorized root daemon context. A normal user agent
   does not retry a source it cannot access.
 

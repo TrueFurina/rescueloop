@@ -8,6 +8,8 @@
 - Restart loop: three exits grouped into one incident with `occurrence_count = 3` and upgraded classification.
 - Observation crash recovery: `scripts/validate-observation-recovery.sh` aborts a process after
   durable occurrence publication, then proves the next ingestion replays the journal exactly once.
+- Container-source unit gates cover oversized event resynchronization, bounded command-output
+  draining, command deadline termination, container-ID validation and bounded restart history.
 - OOM race: Docker `oom` and `die` grouped into one `OutOfMemory` incident.
 - Container repair: exact evidenced container restarted, verified running, receipt persisted, lifecycle marked fixed.
 - File quarantine, cache regeneration, JSON patch, and POSIX permission rollback: tested.
