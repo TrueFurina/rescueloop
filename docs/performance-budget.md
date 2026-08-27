@@ -17,6 +17,8 @@ is a release gate, not an architectural assumption.
   materialize the watched directory tree in memory.
 - Watcher tasks share a cancellation token. Ctrl-C and Unix SIGTERM stop collectors and heartbeat,
   drain the bounded persistence queue for up to 30 seconds, and join every task before exit.
+- Windows also listens for Ctrl-Break, console close, user logoff and system shutdown events through
+  native Tokio console-control streams before entering the same bounded drain path.
 - AI analysis, hashing, repair planning and verification run only after an incident or explicit user
   action; none run during idle.
 - Duplicate artifacts use deterministic IDs and atomic creation.
