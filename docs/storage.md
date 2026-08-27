@@ -14,6 +14,9 @@ lock is released, preventing concurrent watcher/CLI processes from forking the c
 Initial-lineage recovery uses one atomic `append_if_missing` operation: chain validation, duplicate
 check and append happen under the same lock. This removes the previous second full-ledger read and
 prevents concurrent recovery from creating duplicate initial entries.
+If power loss leaves an unterminated final JSONL record, the next exclusive append preserves those
+bytes in a `torn-*` quarantine file, truncates only to the last fully validated hash-chain record,
+syncs the repair, and then appends. Invalid complete records still fail closed as tampering.
 
 Every normalized event is first persisted as an immutable occurrence using `create_new`. The grouped
 incident document is a compact UI projection that may advance its occurrence count and last-seen time;

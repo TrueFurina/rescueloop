@@ -142,7 +142,7 @@ fn append_locked(
         .append(true)
         .open(path)?;
     file.lock_exclusive()?;
-    let prior = read_entries(&file)?;
+    let prior = read_entries_for_append(&file, path)?;
     if skip_existing_incident
         && prior
             .iter()
@@ -186,6 +186,40 @@ fn append_locked(
         sync_directory(parent)?;
     }
     Ok(Some(entry))
+}
+
+fn read_entries_for_append(file: &File, path: &Path) -> Result<Vec<LedgerEntry>> {
+    let mut content = Vec::new();
+    BufReader::new(file.try_clone()?).read_to_end(&mut content)?;
+    if content.is_empty() || content.ends_with(b"\n") {
+        return parse_entries(std::str::from_utf8(&content).context("ledger is not UTF-8")?);
+    }
+    let valid_length = content
+        .iter()
+        .rposition(|byte| *byte == b'\n')
+        .map_or(0, |index| index + 1);
+    let valid = std::str::from_utf8(&content[..valid_length]).context("ledger is not UTF-8")?;
+    let entries = parse_entries(valid)?;
+    quarantine_torn_tail(path, &content[valid_length..])?;
+    file.set_len(valid_length as u64)?;
+    file.sync_data()?;
+    tracing::error!(
+        event = "ledger.torn_tail_recovered",
+        quarantined_bytes = content.len() - valid_length,
+        "Incomplete final ledger record was quarantined"
+    );
+    Ok(entries)
+}
+
+fn quarantine_torn_tail(path: &Path, tail: &[u8]) -> Result<()> {
+    let destination = path.with_extension(format!("torn-{}.json", Uuid::new_v4()));
+    let mut quarantine = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(destination)?;
+    quarantine.write_all(tail)?;
+    quarantine.sync_all()?;
+    sync_directory(path.parent().unwrap_or(Path::new(".")))
 }
 
 #[cfg(unix)]
@@ -420,5 +454,28 @@ mod tests {
         }
         assert_eq!(appended, 1);
         assert_eq!(load(&path).await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn quarantines_a_torn_final_record_before_append() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("ledger.jsonl");
+        append(&path, new(incident("oom", "1"), IncidentStatus::Detected))
+            .await
+            .unwrap();
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(br#"{"schema_version":1,"partial""#).unwrap();
+        file.sync_all().unwrap();
+
+        append(&path, new(incident("panic", "1"), IncidentStatus::Detected))
+            .await
+            .unwrap();
+        assert_eq!(load(&path).await.unwrap().len(), 2);
+        assert!(
+            fs::read_dir(temp.path())
+                .unwrap()
+                .flatten()
+                .any(|entry| { entry.file_name().to_string_lossy().contains(".torn-") })
+        );
     }
 }
