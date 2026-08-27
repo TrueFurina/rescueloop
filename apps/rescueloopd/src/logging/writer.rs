@@ -20,6 +20,7 @@ pub struct WriterConfig {
     pub max_file_bytes: u64,
     pub retention_days: usize,
     pub compress_rotated: bool,
+    pub run_id: String,
 }
 
 #[derive(Clone)]
@@ -82,31 +83,55 @@ impl<'a> MakeWriter<'a> for RollingWriter {
 
     fn make_writer(&'a self) -> Self::Writer {
         EventWriter {
-            state: self.state.lock().unwrap_or_else(|error| error.into_inner()),
+            state: Some(self.state.lock().unwrap_or_else(|error| error.into_inner())),
             health: &self.health,
+            buffer: Vec::new(),
+            committed: false,
         }
     }
 }
 
 pub struct EventWriter<'a> {
-    state: MutexGuard<'a, State>,
+    state: Option<MutexGuard<'a, State>>,
     health: &'a LogHealth,
+    buffer: Vec<u8>,
+    committed: bool,
 }
 
 impl Write for EventWriter<'_> {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
-        match self.state.write(buffer) {
-            Ok(size) => Ok(size),
-            Err(error) => {
-                self.health.write_errors.fetch_add(1, Ordering::Relaxed);
-                let _ = writeln!(io::stderr(), "RescueLoop log write failed: {error}");
-                Err(error)
-            }
-        }
+        self.buffer.extend_from_slice(buffer);
+        Ok(buffer.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        self.state.flush()
+        self.commit()?;
+        self.state.as_mut().map_or(Ok(()), |state| state.flush())
+    }
+}
+
+impl Drop for EventWriter<'_> {
+    fn drop(&mut self) {
+        if let Err(error) = self.commit() {
+            self.health.write_errors.fetch_add(1, Ordering::Relaxed);
+            let _ = writeln!(io::stderr(), "RescueLoop log write failed: {error}");
+        }
+    }
+}
+
+impl EventWriter<'_> {
+    fn commit(&mut self) -> io::Result<()> {
+        if self.committed || self.buffer.is_empty() {
+            return Ok(());
+        }
+        let state = self
+            .state
+            .as_mut()
+            .ok_or_else(|| io::Error::other("log writer state is unavailable"))?;
+        let encoded = enrich_and_redact(&self.buffer, &state.config.run_id)?;
+        state.write(&encoded)?;
+        self.committed = true;
+        Ok(())
     }
 }
 
@@ -114,7 +139,9 @@ impl State {
     fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
         let today = Local::now().date_naive();
         if today != self.date
-            || self.bytes_written.saturating_add(buffer.len() as u64) > self.config.max_file_bytes
+            || (self.bytes_written > 0
+                && self.bytes_written.saturating_add(buffer.len() as u64)
+                    > self.config.max_file_bytes)
         {
             self.rotate(today)?;
         }
@@ -229,6 +256,81 @@ fn prune_expired(directory: &Path, retention_days: usize) -> Result<()> {
     Ok(())
 }
 
+fn enrich_and_redact(buffer: &[u8], run_id: &str) -> io::Result<Vec<u8>> {
+    let mut record: serde_json::Value = serde_json::from_slice(buffer)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    redact(&mut record, None);
+    let object = record
+        .as_object_mut()
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "log record is not an object"))?;
+    object.insert("schema_version".into(), 1.into());
+    object.insert("run_id".into(), run_id.into());
+    let correlation = object
+        .get("fields")
+        .and_then(serde_json::Value::as_object)
+        .and_then(|fields| {
+            fields
+                .get("incident_id")
+                .or_else(|| fields.get("transaction_id"))
+        })
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or(run_id)
+        .to_string();
+    object.insert("correlation_id".into(), correlation.into());
+    let mut encoded = serde_json::to_vec(&record).map_err(io::Error::other)?;
+    encoded.push(b'\n');
+    Ok(encoded)
+}
+
+fn redact(value: &mut serde_json::Value, key: Option<&str>) {
+    if key.is_some_and(is_sensitive_key) {
+        *value = serde_json::Value::String("[REDACTED]".into());
+        return;
+    }
+    match value {
+        serde_json::Value::Object(values) => {
+            for (key, value) in values {
+                redact(value, Some(key));
+            }
+        }
+        serde_json::Value::Array(values) => {
+            for value in values {
+                redact(value, key);
+            }
+        }
+        serde_json::Value::String(text) => redact_home(text),
+        _ => {}
+    }
+}
+
+fn is_sensitive_key(key: &str) -> bool {
+    let key = key.to_ascii_lowercase();
+    [
+        "token",
+        "password",
+        "secret",
+        "authorization",
+        "bearer",
+        "arguments",
+        "command_line",
+        "raw_evidence",
+        "file_content",
+    ]
+    .iter()
+    .any(|sensitive| key.contains(sensitive))
+        || matches!(key.as_str(), "path" | "directory" | "artifact")
+        || key.ends_with("_path")
+}
+
+fn redact_home(text: &mut String) {
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = home.to_string_lossy();
+        if !home.is_empty() && text.contains(home.as_ref()) {
+            *text = text.replace(home.as_ref(), "<HOME>");
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -246,13 +348,20 @@ mod tests {
         let directory = temp_directory();
         let writer = RollingWriter::new(WriterConfig {
             directory: directory.clone(),
-            max_file_bytes: 8,
+            max_file_bytes: 1,
             retention_days: 14,
             compress_rotated: true,
+            run_id: "test-run".into(),
         })
         .unwrap();
-        writer.make_writer().write_all(b"12345678").unwrap();
-        writer.make_writer().write_all(b"next").unwrap();
+        writer
+            .make_writer()
+            .write_all(br#"{"fields":{"event":"first"}}"#)
+            .unwrap();
+        writer
+            .make_writer()
+            .write_all(br#"{"fields":{"event":"second"}}"#)
+            .unwrap();
 
         let compressed = fs::read_dir(&directory)
             .unwrap()
@@ -263,7 +372,8 @@ mod tests {
         flate2::read::GzDecoder::new(File::open(&compressed).unwrap())
             .read_to_string(&mut decoded)
             .unwrap();
-        assert_eq!(decoded, "12345678");
+        let record: serde_json::Value = serde_json::from_str(&decoded).unwrap();
+        assert_eq!(record["fields"]["event"], "first");
         fs::remove_dir_all(&directory).unwrap();
     }
 
@@ -273,5 +383,19 @@ mod tests {
             write_errors: Arc::new(AtomicU64::new(2)),
         };
         assert_eq!(health.write_errors(), 2);
+    }
+
+    #[test]
+    fn adds_context_and_redacts_sensitive_fields() {
+        let encoded = enrich_and_redact(
+            br#"{"fields":{"event":"test","token":"secret","incident_id":"incident-1"}}"#,
+            "run-1",
+        )
+        .unwrap();
+        let record: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(record["schema_version"], 1);
+        assert_eq!(record["run_id"], "run-1");
+        assert_eq!(record["correlation_id"], "incident-1");
+        assert_eq!(record["fields"]["token"], "[REDACTED]");
     }
 }

@@ -24,6 +24,7 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
         max_file_bytes: max_file_bytes(),
         retention_days,
         compress_rotated: true,
+        run_id: uuid::Uuid::new_v4().to_string(),
     };
     let appender = RollingWriter::new(config)?;
     let health = appender.health();
@@ -49,6 +50,7 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
         directory = %directory.display(),
         retention_days,
         format = "jsonl",
+        schema_version = 1,
         "Operational logging initialized"
     );
     Ok(LogGuard { health })

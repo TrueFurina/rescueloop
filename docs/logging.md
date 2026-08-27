@@ -33,8 +33,9 @@ RUST_LOG=rescueloop=debug,rescueloop_platform=debug rescueloop watch
 
 ## Event contract
 
-Every record contains a timestamp, level, target, message and stable `event`
-name. Lifecycle records add identifiers and outcomes where applicable.
+Every record contains `schema_version`, `run_id`, `correlation_id`, timestamp,
+level, target, message and stable `event` name. Lifecycle records add identifiers
+and outcomes where applicable.
 
 Important event families:
 
@@ -47,6 +48,6 @@ Important event families:
 - `verification.*`: replay result;
 - `lineage.*`: durable ledger append.
 
-Logs never include AI bearer tokens, launch arguments, raw evidence bodies or
-repair file contents. Local state paths may appear in logger initialization and
-error messages.
+The writer centrally redacts token, password, authorization, launch argument,
+raw evidence, file-content and path fields. Home-directory fragments embedded
+in other strings are replaced with `<HOME>`.
