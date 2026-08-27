@@ -20,6 +20,10 @@ Use the CLI to inspect the latest file:
 ```sh
 rescueloop logs
 rescueloop logs --lines 250
+rescueloop logs --follow --level warn
+rescueloop logs --event repair.rolled_back --output json
+rescueloop logs --correlation-id <incident-id>
+rescueloop logs --since 2026-08-27T10:00:00Z --until 2026-08-27T11:00:00Z
 ```
 
 ## Levels

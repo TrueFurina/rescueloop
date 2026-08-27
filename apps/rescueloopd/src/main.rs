@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use rescueloop_agent::{ALLOWED_ACTIONS, HttpAnalysisProvider};
 use rescueloop_core::{AnalysisProvider, AnalysisRequest, Incident};
 use std::path::{Path, PathBuf};
@@ -58,6 +58,20 @@ enum Command {
     Logs {
         #[arg(long, default_value_t = 100)]
         lines: usize,
+        #[arg(long)]
+        follow: bool,
+        #[arg(long)]
+        level: Option<String>,
+        #[arg(long)]
+        event: Option<String>,
+        #[arg(long)]
+        correlation_id: Option<String>,
+        #[arg(long)]
+        since: Option<String>,
+        #[arg(long)]
+        until: Option<String>,
+        #[arg(long, value_enum, default_value_t = LogOutput::Pretty)]
+        output: LogOutput,
     },
     /// Connect to the background detector through the local incident store.
     Console {
@@ -124,6 +138,12 @@ enum IndexAction {
     Rebuild,
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum LogOutput {
+    Pretty,
+    Json,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -168,7 +188,34 @@ async fn run(cli: Cli) -> Result<()> {
         Some(Command::Setup) => setup(&cli.incident_dir).await,
         Some(Command::Sources { action }) => sources(&cli.incident_dir, action).await,
         Some(Command::Index { action }) => index_command(&cli.incident_dir, action).await,
-        Some(Command::Logs { lines }) => logging::print_recent(&cli.incident_dir, lines).await,
+        Some(Command::Logs {
+            lines,
+            follow,
+            level,
+            event,
+            correlation_id,
+            since,
+            until,
+            output,
+        }) => {
+            logging::query(
+                &cli.incident_dir,
+                logging::LogQuery {
+                    lines,
+                    follow,
+                    level,
+                    event,
+                    correlation_id,
+                    since,
+                    until,
+                    output: match output {
+                        LogOutput::Pretty => logging::LogOutput::Pretty,
+                        LogOutput::Json => logging::LogOutput::Json,
+                    },
+                },
+            )
+            .await
+        }
         Some(Command::Console {
             endpoint,
             token,

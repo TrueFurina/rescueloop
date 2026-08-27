@@ -2,8 +2,10 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
+mod query;
 mod writer;
 
+pub use query::{LogOutput, LogQuery, run as query};
 use writer::{LogHealth, RollingWriter, WriterConfig};
 
 const DEFAULT_FILTER: &str = "info,hyper=warn,reqwest=warn,rustls=warn";
@@ -80,40 +82,6 @@ fn max_file_bytes() -> u64 {
         .and_then(|value| value.parse().ok())
         .filter(|value| *value >= 1024)
         .unwrap_or(DEFAULT_MAX_FILE_BYTES)
-}
-
-pub async fn print_recent(incident_dir: &Path, line_limit: usize) -> Result<()> {
-    let directory = log_directory(incident_dir);
-    let mut entries = tokio::fs::read_dir(&directory)
-        .await
-        .with_context(|| format!("cannot read log directory: {}", directory.display()))?;
-    let mut files = Vec::new();
-    while let Some(entry) = entries.next_entry().await? {
-        if entry.file_type().await?.is_file()
-            && entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("rescueloop-")
-            && entry
-                .path()
-                .extension()
-                .is_some_and(|value| value == "jsonl")
-        {
-            files.push(entry.path());
-        }
-    }
-    files.sort();
-    let Some(path) = files.last() else {
-        println!("No operational logs yet: {}", directory.display());
-        return Ok(());
-    };
-    let content = tokio::fs::read_to_string(path).await?;
-    let lines: Vec<_> = content.lines().collect();
-    for line in lines.iter().skip(lines.len().saturating_sub(line_limit)) {
-        println!("{line}");
-    }
-    eprintln!("Log file: {}", path.display());
-    Ok(())
 }
 
 fn install_panic_hook() {
