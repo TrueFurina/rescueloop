@@ -57,6 +57,16 @@ cargo build --release -p rescueloop
 scripts/benchmark-idle.sh 1800
 ```
 
+On Windows, run the equivalent native process-CPU and working-set gate with:
+
+```powershell
+cargo build --release -p rescueloop
+./scripts/benchmark-idle-windows.ps1 -DurationSeconds 1800
+```
+
+CI runs a 30-second release smoke on every Windows change. The scheduled soak runs the configured
+duration (24 hours by default) on both macOS and Windows.
+
 ## Measured results
 
 On macOS arm64, an unoptimized development build using the event-driven DiagnosticReports collector

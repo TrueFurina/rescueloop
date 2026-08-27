@@ -37,3 +37,9 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         run: ./scripts/e2e-windows.ps1
+      - name: Windows idle performance smoke
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cargo build --release -p rescueloop
+          ./scripts/benchmark-idle-windows.ps1 -DurationSeconds 30

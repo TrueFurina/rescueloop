@@ -18,3 +18,12 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release -p rescueloop
       - run: ./scripts/soak.sh "${{ inputs.duration_seconds || '86400' }}"
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 1500
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release -p rescueloop
+      - shell: pwsh
+        run: ./scripts/benchmark-idle-windows.ps1 -DurationSeconds "${{ inputs.duration_seconds || '86400' }}"
