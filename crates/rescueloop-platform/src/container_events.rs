@@ -320,15 +320,7 @@ fn diagnostic_log_lines(bytes: &[u8]) -> Vec<String> {
         "refused",
         "timeout",
     ];
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            KEYS.iter().any(|key| lower.contains(key))
-        })
-        .take(30)
-        .map(|line| line.chars().take(500).collect())
-        .collect()
+    crate::diagnostics::select_lines(&String::from_utf8_lossy(bytes), KEYS, &[], 30)
 }
 
 #[cfg(test)]

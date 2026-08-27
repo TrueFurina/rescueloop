@@ -1,5 +1,6 @@
 mod artifact_watcher;
 mod container_events;
+mod diagnostics;
 mod os_events;
 mod supervised;
 

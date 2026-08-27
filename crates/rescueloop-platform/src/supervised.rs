@@ -134,17 +134,12 @@ fn diagnostic_output_lines(stdout: &[u8], stderr: &[u8]) -> Vec<String> {
         "permission",
         "runtime",
     ];
-    [stdout, stderr]
-        .concat()
-        .split(|byte| *byte == b'\n')
-        .filter_map(|line| std::str::from_utf8(line).ok())
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            KEYS.iter().any(|key| lower.contains(key))
-        })
-        .take(20)
-        .map(|line| line.chars().take(500).collect())
-        .collect()
+    crate::diagnostics::select_lines(
+        &String::from_utf8_lossy(&[stdout, stderr].concat()),
+        KEYS,
+        &[],
+        20,
+    )
 }
 
 #[derive(Debug, Clone, serde::Serialize)]

@@ -112,8 +112,7 @@ fn is_rescueloop(name: Option<&str>) -> bool {
     name.is_some_and(|name| name.to_ascii_lowercase().starts_with("rescueloop"))
 }
 
-/// Extract only diagnostic metadata useful for a first-pass analysis. Full report
-/// text, command lines, environment, paths and user content remain local.
+/// Keeps diagnostics while excluding paths and commands.
 fn diagnostic_lines(bytes: &[u8]) -> Vec<String> {
     const KEYS: &[&str] = &[
         "app_name",
@@ -128,17 +127,12 @@ fn diagnostic_lines(bytes: &[u8]) -> Vec<String> {
         "termination",
         "version",
     ];
-    String::from_utf8_lossy(bytes)
-        .lines()
-        .filter(|line| {
-            let lower = line.to_ascii_lowercase();
-            KEYS.iter().any(|key| lower.contains(key))
-                && !lower.contains("path")
-                && !lower.contains("command")
-        })
-        .take(40)
-        .map(|line| line.trim().chars().take(500).collect())
-        .collect()
+    crate::diagnostics::select_lines(
+        &String::from_utf8_lossy(bytes),
+        KEYS,
+        &["path", "command"],
+        40,
+    )
 }
 
 #[async_trait]
