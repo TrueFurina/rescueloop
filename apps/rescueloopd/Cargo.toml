@@ -36,5 +36,6 @@ libc.workspace = true
 windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
 
 [dev-dependencies]
+async-trait.workspace = true
 bytes = "1"
 rmcp = { workspace = true, features = ["client"] }

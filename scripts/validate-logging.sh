@@ -2,7 +2,8 @@
 set -euo pipefail
 
 task_state_dir=$(mktemp -d)
-trap 'rm -rf "$task_state_dir"' EXIT
+watcher_pid=""
+trap 'if [ -n "$watcher_pid" ]; then kill "$watcher_pid" 2>/dev/null || true; fi; rm -rf "$task_state_dir"' EXIT
 
 RUST_LOG=info cargo run --quiet -p rescueloop -- \
   --incident-dir "$task_state_dir/incidents" sources list >/dev/null
@@ -18,6 +19,18 @@ if RESCUELOOP_TEST_PANIC=1 RUST_LOG=info cargo run --quiet -p rescueloop -- \
   echo "expected debug panic" >&2
   exit 1
 fi
+
+RUST_LOG=info target/debug/rescueloop --incident-dir "$task_state_dir/incidents" watch \
+  >"$task_state_dir/watcher.out" 2>"$task_state_dir/watcher.err" &
+watcher_pid=$!
+for _ in 1 2 3 4 5 6 7 8 9 10; do
+  grep -Fq 'Status: READY' "$task_state_dir/watcher.out" && break
+  sleep 0.2
+done
+grep -Fq 'Status: READY' "$task_state_dir/watcher.out"
+kill -TERM "$watcher_pid"
+wait "$watcher_pid"
+watcher_pid=""
 
 parallel_pids=""
 for _ in 1 2 3 4 5 6 7 8; do
@@ -39,6 +52,7 @@ jq -e 'select(.schema_version == 1 and .run_id and .correlation_id and .fields.e
   "$records_file" >/dev/null
 jq -e 'select(.fields.event == "runtime.failed")' "$records_file" >/dev/null
 jq -e 'select(.fields.event == "runtime.panic")' "$records_file" >/dev/null
+jq -e 'select(.fields.event == "watch.stopped")' "$records_file" >/dev/null
 test "$(jq -r '.run_id' "$records_file" | sort -u | wc -l)" -ge 3
 
 RUST_LOG=info cargo run --quiet -p rescueloop -- \

@@ -15,6 +15,8 @@ is a release gate, not an architectural assumption.
 - Native artifact callbacks use a 1,024-path bounded queue. Overflow triggers a recursive
   reconciliation whose scanner streams through a 256-path bounded channel, so recovery does not
   materialize the watched directory tree in memory.
+- Watcher tasks share a cancellation token. Ctrl-C and Unix SIGTERM stop collectors and heartbeat,
+  drain the bounded persistence queue for up to 30 seconds, and join every task before exit.
 - AI analysis, hashing, repair planning and verification run only after an incident or explicit user
   action; none run during idle.
 - Duplicate artifacts use deterministic IDs and atomic creation.

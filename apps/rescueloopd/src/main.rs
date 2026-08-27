@@ -3,8 +3,6 @@ use clap::{Parser, Subcommand, ValueEnum};
 use rescueloop_agent::{ALLOWED_ACTIONS, HttpAnalysisProvider};
 use rescueloop_core::{AnalysisProvider, AnalysisRequest, Incident};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
-use std::time::Duration;
 use tokio::fs;
 use tracing::{error, info};
 
@@ -17,14 +15,14 @@ mod service;
 mod storage;
 mod tui;
 mod watch_health;
+mod watcher;
 
 pub(crate) use console::configured_provider;
-use console::{console, index_command, load_settings, setup, sources};
+use console::{console, index_command, setup, sources};
 pub(crate) use incident_store::local_timestamp;
 pub(crate) use incident_store::{dismiss_incident, record_incident_status};
 use incident_store::{incidents, save_incident};
 pub(crate) use repair_flow::{repair, repair_silent};
-use watch_health::WatchHealth;
 
 #[derive(Parser)]
 #[command(
@@ -190,7 +188,7 @@ async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => tui::run(cli.incident_dir, None, None).await,
         Some(Command::Mcp) => mcp::serve(&cli.incident_dir).await,
-        Some(Command::Watch) => watch(&cli.incident_dir).await,
+        Some(Command::Watch) => watcher::run(&cli.incident_dir).await,
         Some(Command::Service { action }) => match action {
             ServiceAction::Install => service::install(&cli.incident_dir).await,
             ServiceAction::InstallSystem => service::install_system(&cli.incident_dir).await,
@@ -291,149 +289,6 @@ impl Command {
             Self::Repair { .. } => "repair",
         }
     }
-}
-
-async fn watch(dir: &Path) -> Result<()> {
-    fs::create_dir_all(dir).await?;
-    let settings = load_settings(dir).await?;
-    let sources = rescueloop_platform::event_sources(&settings.enabled_sources)?;
-    let source_names: Vec<_> = sources.iter().map(|source| source.name()).collect();
-    info!(
-        event = "watch.ready",
-        sources = ?source_names,
-        "Watcher initialized"
-    );
-    println!("RescueLoop {}", env!("CARGO_PKG_VERSION"));
-    println!("Status: READY — monitoring for objective failures");
-    println!(
-        "Platform: {} ({})",
-        std::env::consts::OS,
-        std::env::consts::ARCH
-    );
-    println!("Event sources: {}", source_names.join(", "));
-    println!("Incidents: {}", dir.display());
-    println!("Privacy: local detection only; AI analysis starts only on request");
-    println!("Waiting for a new failure event...\n");
-    // Bound memory during crash storms. Each collector naturally pauses while
-    // persistence catches up instead of growing an unbounded process queue.
-    let (sender, mut events) = tokio::sync::mpsc::channel(256);
-    let health = Arc::new(WatchHealth::default());
-    let heartbeat_sources = source_names.len();
-    let heartbeat_health = Arc::clone(&health);
-    let heartbeat = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            let snapshot = heartbeat_health.snapshot();
-            info!(
-                event = "watch.heartbeat",
-                source_count = heartbeat_sources,
-                active_sources = snapshot.active_sources,
-                degraded_sources = snapshot.degraded_sources,
-                retry_count = snapshot.retry_count,
-                received = snapshot.received,
-                persisted = snapshot.persisted,
-                grouped = snapshot.grouped,
-                queue_depth = snapshot.queue_depth,
-                "Watcher is alive"
-            );
-        }
-    });
-    for mut source in sources {
-        let sender = sender.clone();
-        let health = Arc::clone(&health);
-        tokio::spawn(async move {
-            health.source_started();
-            info!(
-                event = "source.started",
-                source = source.name(),
-                "Event source started"
-            );
-            let mut retry_delay = Duration::from_secs(2);
-            let mut degraded = false;
-            loop {
-                match source.next_incident().await {
-                    Ok(incident) => {
-                        if degraded {
-                            info!(
-                                event = "source.recovered",
-                                source = source.name(),
-                                "Event source recovered"
-                            );
-                            degraded = false;
-                            health.source_recovered();
-                        }
-                        retry_delay = Duration::from_secs(2);
-                        info!(
-                            event = "observation.received",
-                            source = source.name(),
-                            incident_id = %incident.id,
-                            kind = ?incident.kind,
-                            "Failure observation received"
-                        );
-                        health.observation_received();
-                        if sender.send(incident).await.is_err() {
-                            info!(
-                                event = "source.stopped",
-                                source = source.name(),
-                                reason = "receiver_closed",
-                                "Event source stopped"
-                            );
-                            health.source_stopped(degraded);
-                            break;
-                        }
-                        health.queued();
-                    }
-                    Err(error) => {
-                        if !degraded {
-                            health.source_degraded();
-                        }
-                        degraded = true;
-                        health.retrying();
-                        tracing::warn!(
-                            event = "source.retrying",
-                            source = source.name(),
-                            error = %format!("{error:#}"),
-                            retry_delay_ms = retry_delay.as_millis(),
-                            "Event source failed; reconnecting"
-                        );
-                        tokio::time::sleep(retry_delay).await;
-                        retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
-                    }
-                }
-            }
-        });
-    }
-    drop(sender);
-    while let Some(incident) = events.recv().await {
-        health.dequeued();
-        let (destination, created) = save_incident(dir, &incident).await?;
-        if !created {
-            health.grouped();
-            info!(event = "incident.grouped", incident_id = %incident.id, "Incident grouped with an active failure");
-            continue;
-        }
-        health.persisted();
-        info!(
-            event = "incident.persisted",
-            incident_id = %incident.id,
-            kind = ?incident.kind,
-            "New incident persisted"
-        );
-        println!("DETECTED: {:?}: {}", incident.kind, incident.message);
-        println!("Incident saved to {}", destination.display());
-        println!(
-            "Analysis has NOT started. Run: rescueloop analyze '{}' --endpoint <URL>",
-            destination.display()
-        );
-    }
-    heartbeat.abort();
-    error!(
-        event = "watch.sources_exhausted",
-        "All event sources stopped"
-    );
-    anyhow::bail!("all event sources stopped")
 }
 
 async fn run_supervised(
