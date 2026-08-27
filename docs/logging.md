@@ -35,6 +35,22 @@ The default level is `info` for RescueLoop crates. Override it with standard
 RUST_LOG=rescueloop=debug,rescueloop_platform=debug rescueloop watch
 ```
 
+## Optional OTLP export
+
+Local JSONL remains authoritative. To additionally export records using
+OTLP/HTTP JSON, set an exact logs endpoint:
+
+```sh
+RESCUELOOP_OTLP_ENDPOINT=https://collector.example/v1/logs rescueloop watch
+```
+
+Optional headers use comma-separated `name=value` pairs in
+`RESCUELOOP_OTLP_HEADERS`. Header values are never logged. Export is bounded and
+best-effort; network failures do not block or remove local records.
+
+Native CI validates structured startup/failure records and querying on macOS
+and Windows. Run `scripts/validate-logging.sh` locally on Unix-like systems.
+
 ## Event contract
 
 Every record contains `schema_version`, `run_id`, `correlation_id`, timestamp,

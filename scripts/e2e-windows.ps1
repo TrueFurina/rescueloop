@@ -11,6 +11,17 @@ try {
     if ($Incident.kind -ne "abnormal_exit") { throw "unexpected incident kind: $($Incident.kind)" }
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents sources list
     if ($LASTEXITCODE -ne 0) { throw "sources command failed" }
+    & cargo run --quiet -p rescueloop -- --incident-dir $Incidents replay (Join-Path $Root "missing.json") 2>$null
+    if ($LASTEXITCODE -eq 0) { throw "expected replay failure" }
+    $LogFiles = @(Get-ChildItem (Join-Path $Root "logs") -Filter "rescueloop-*.jsonl")
+    if ($LogFiles.Count -lt 1) { throw "expected operational log file" }
+    $LogRecords = @(Get-Content $LogFiles[-1].FullName | ForEach-Object { $_ | ConvertFrom-Json })
+    if (-not ($LogRecords | Where-Object { $_.fields.event -eq "runtime.failed" })) {
+        throw "runtime.failed log event not found"
+    }
+    if ($LogRecords | Where-Object { -not $_.schema_version -or -not $_.run_id -or -not $_.correlation_id }) {
+        throw "log context fields are incomplete"
+    }
     & cargo run --quiet -p rescueloop -- service status
     if ($LASTEXITCODE -ne 0) { throw "service status failed" }
     Write-Host "Windows native E2E passed."

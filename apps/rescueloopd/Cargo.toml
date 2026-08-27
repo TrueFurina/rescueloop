@@ -17,6 +17,7 @@ rescueloop-index = { path = "../../crates/rescueloop-index" }
 rescueloop-platform = { path = "../../crates/rescueloop-platform" }
 rescueloop-repair = { path = "../../crates/rescueloop-repair" }
 ratatui.workspace = true
+reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true

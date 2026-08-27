@@ -165,6 +165,7 @@ async fn main() -> Result<()> {
             event = "runtime.stopped",
             command,
             log_write_errors = _log_guard.write_errors(),
+            log_export_drops = _log_guard.export_drops(),
             "RescueLoop stopped"
         ),
         Err(error) => error!(

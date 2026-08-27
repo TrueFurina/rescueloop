@@ -11,6 +11,7 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+use tokio::sync::mpsc;
 use tracing_subscriber::fmt::MakeWriter;
 
 const LOG_PREFIX: &str = "rescueloop-";
@@ -21,16 +22,22 @@ pub struct WriterConfig {
     pub retention_days: usize,
     pub compress_rotated: bool,
     pub run_id: String,
+    pub export: Option<mpsc::Sender<Vec<u8>>>,
 }
 
 #[derive(Clone)]
 pub struct LogHealth {
     write_errors: Arc<AtomicU64>,
+    export_drops: Arc<AtomicU64>,
 }
 
 impl LogHealth {
     pub fn write_errors(&self) -> u64 {
         self.write_errors.load(Ordering::Relaxed)
+    }
+
+    pub fn export_drops(&self) -> u64 {
+        self.export_drops.load(Ordering::Relaxed)
     }
 }
 
@@ -69,6 +76,7 @@ impl RollingWriter {
             }),
             health: LogHealth {
                 write_errors: Arc::new(AtomicU64::new(0)),
+                export_drops: Arc::new(AtomicU64::new(0)),
             },
         })
     }
@@ -129,14 +137,14 @@ impl EventWriter<'_> {
             .as_mut()
             .ok_or_else(|| io::Error::other("log writer state is unavailable"))?;
         let encoded = enrich_and_redact(&self.buffer, &state.config.run_id)?;
-        state.write(&encoded)?;
+        state.write(&encoded, self.health)?;
         self.committed = true;
         Ok(())
     }
 }
 
 impl State {
-    fn write(&mut self, buffer: &[u8]) -> io::Result<usize> {
+    fn write(&mut self, buffer: &[u8], health: &LogHealth) -> io::Result<usize> {
         let today = Local::now().date_naive();
         if today != self.date
             || (self.bytes_written > 0
@@ -145,13 +153,17 @@ impl State {
         {
             self.rotate(today)?;
         }
-        let written = self
-            .file
+        self.file
             .as_mut()
             .ok_or_else(|| io::Error::other("log file is unavailable"))?
-            .write(buffer)?;
-        self.bytes_written = self.bytes_written.saturating_add(written as u64);
-        Ok(written)
+            .write_all(buffer)?;
+        self.bytes_written = self.bytes_written.saturating_add(buffer.len() as u64);
+        if let Some(export) = &self.config.export
+            && export.try_send(buffer.to_vec()).is_err()
+        {
+            health.export_drops.fetch_add(1, Ordering::Relaxed);
+        }
+        Ok(buffer.len())
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -359,6 +371,7 @@ mod tests {
             retention_days: 14,
             compress_rotated: true,
             run_id: "test-run".into(),
+            export: None,
         })
         .unwrap();
         writer
@@ -388,8 +401,10 @@ mod tests {
     fn records_write_health() {
         let health = LogHealth {
             write_errors: Arc::new(AtomicU64::new(2)),
+            export_drops: Arc::new(AtomicU64::new(3)),
         };
         assert_eq!(health.write_errors(), 2);
+        assert_eq!(health.export_drops(), 3);
     }
 
     #[test]

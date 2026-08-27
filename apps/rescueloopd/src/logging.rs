@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::{EnvFilter, fmt::format::FmtSpan};
 
+mod export;
 mod query;
 mod writer;
 
@@ -14,6 +15,7 @@ const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
 pub struct LogGuard {
     health: LogHealth,
+    exporter: Option<tokio::task::JoinHandle<()>>,
 }
 
 pub fn init(incident_dir: &Path) -> Result<LogGuard> {
@@ -21,12 +23,14 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("cannot create log directory: {}", directory.display()))?;
     let retention_days = retention_days();
+    let export = export::configure()?;
     let config = WriterConfig {
         directory: directory.clone(),
         max_file_bytes: max_file_bytes(),
         retention_days,
         compress_rotated: true,
         run_id: uuid::Uuid::new_v4().to_string(),
+        export: export.as_ref().map(|value| value.sender.clone()),
     };
     let appender = RollingWriter::new(config)?;
     let health = appender.health();
@@ -56,12 +60,25 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
         schema_version = 1,
         "Operational logging initialized"
     );
-    Ok(LogGuard { health })
+    let exporter = export.map(export::spawn);
+    Ok(LogGuard { health, exporter })
 }
 
 impl LogGuard {
     pub fn write_errors(&self) -> u64 {
         self.health.write_errors()
+    }
+
+    pub fn export_drops(&self) -> u64 {
+        self.health.export_drops()
+    }
+}
+
+impl Drop for LogGuard {
+    fn drop(&mut self) {
+        if let Some(exporter) = self.exporter.take() {
+            exporter.abort();
+        }
     }
 }
 

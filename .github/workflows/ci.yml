@@ -20,6 +20,9 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --workspace
       - run: cargo clippy --workspace --all-targets -- -D warnings
+      - name: Unix logging E2E
+        if: runner.os != 'Windows'
+        run: ./scripts/validate-logging.sh
       - name: Windows native E2E
         if: runner.os == 'Windows'
         shell: pwsh
