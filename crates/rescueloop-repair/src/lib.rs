@@ -73,6 +73,8 @@ pub async fn execute_operational(
             let previous_running = container_running(engine, container_id).await?;
             let status = tokio::process::Command::new(engine)
                 .args(["restart", container_id])
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
                 .status()
                 .await?;
             if !status.success() {
@@ -83,6 +85,8 @@ pub async fn execute_operational(
             if !verified && !previous_running {
                 let _ = tokio::process::Command::new(engine)
                     .args(["stop", container_id])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .status()
                     .await;
                 rolled_back = true;
@@ -124,6 +128,8 @@ async fn execute_service(
             .success();
         let status = tokio::process::Command::new("launchctl")
             .args(["kickstart", "-k", service_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await?;
         let verified = status.success()
@@ -152,10 +158,14 @@ async fn execute_service(
             .any(|value| value == b"RUNNING");
         let _ = tokio::process::Command::new("sc.exe")
             .args(["stop", service_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await;
         let status = tokio::process::Command::new("sc.exe")
             .args(["start", service_id])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .await?;
         return Ok(OperationalReceipt {

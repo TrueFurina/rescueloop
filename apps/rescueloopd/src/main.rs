@@ -41,6 +41,11 @@ enum Command {
         #[command(subcommand)]
         action: SourcesAction,
     },
+    /// Inspect or safely rebuild the disposable incident index.
+    Index {
+        #[command(subcommand)]
+        action: IndexAction,
+    },
     /// Connect to the background detector through the local incident store.
     Console {
         #[arg(long, env = "RESCUELOOP_AI_ENDPOINT")]
@@ -100,6 +105,12 @@ enum SourcesAction {
     Disable { name: String },
 }
 
+#[derive(Subcommand)]
+enum IndexAction {
+    Status,
+    Rebuild,
+}
+
 const SOURCE_NAMES: &[&str] = &["system-artifacts", "containers", "os-log"];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -141,6 +152,7 @@ async fn main() -> Result<()> {
         },
         Some(Command::Setup) => setup(&cli.incident_dir).await,
         Some(Command::Sources { action }) => sources(&cli.incident_dir, action).await,
+        Some(Command::Index { action }) => index_command(&cli.incident_dir, action).await,
         Some(Command::Console {
             endpoint,
             token,
@@ -524,6 +536,24 @@ async fn sources(incident_dir: &Path, action: SourcesAction) -> Result<()> {
     Ok(())
 }
 
+async fn index_command(incident_dir: &Path, action: IndexAction) -> Result<()> {
+    let index = incident_index(incident_dir).await?;
+    match action {
+        IndexAction::Status => {
+            println!("Index: {}", index.path().display());
+            println!("Schema: v1 (disposable projection)");
+            println!("Indexed incidents: {}", index.count().await?);
+            println!("Source of truth: {}", incident_dir.display());
+        }
+        IndexAction::Rebuild => {
+            let count = index.rebuild().await?;
+            println!("Rebuilt index from {count} versioned JSON incident(s).");
+            println!("No source JSON was modified.");
+        }
+    }
+    Ok(())
+}
+
 fn config_path(incident_dir: &Path) -> PathBuf {
     incident_dir
         .parent()
@@ -582,14 +612,20 @@ fn confirm_default(prompt: &str, default: bool) -> Result<bool> {
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
     let mut result = Vec::new();
-    let Ok(mut entries) = fs::read_dir(dir).await else {
-        return Ok(result);
-    };
-    while let Some(entry) = entries.next_entry().await? {
-        let path = entry.path();
-        if path.extension().and_then(|x| x.to_str()) != Some("json") {
-            continue;
+    let paths = match incident_index(dir).await {
+        Ok(index) => match index.paths_newest_first().await {
+            Ok(paths) => paths,
+            Err(error) => {
+                tracing::warn!(%error, "incident index unavailable; reading JSON directly");
+                incident_json_paths(dir).await?
+            }
+        },
+        Err(error) => {
+            tracing::warn!(%error, "incident index could not open; reading JSON directly");
+            incident_json_paths(dir).await?
         }
+    };
+    for path in paths {
         if let Ok(bytes) = fs::read(&path).await
             && let Ok(incident) = serde_json::from_slice::<Incident>(&bytes)
         {
@@ -624,6 +660,25 @@ pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
     });
     result.sort_by_key(|item| std::cmp::Reverse(item.0.observed_at));
     Ok(result)
+}
+
+async fn incident_json_paths(dir: &Path) -> Result<Vec<PathBuf>> {
+    let mut paths = Vec::new();
+    let Ok(mut entries) = fs::read_dir(dir).await else {
+        return Ok(paths);
+    };
+    while let Some(entry) = entries.next_entry().await? {
+        let path = entry.path();
+        if path.extension().and_then(|value| value.to_str()) == Some("json") {
+            paths.push(path);
+        }
+    }
+    Ok(paths)
+}
+
+async fn incident_index(dir: &Path) -> Result<rescueloop_index::IncidentIndex> {
+    let state_root = dir.parent().unwrap_or(dir);
+    rescueloop_index::IncidentIndex::open(state_root, dir).await
 }
 
 async fn print_incidents(dir: &Path) -> Result<()> {
@@ -676,6 +731,7 @@ async fn incident_by_number(dir: &Path, number: &str) -> Result<Incident> {
 
 async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir).await?;
+    save_occurrence(dir, incident).await?;
     let group_key = incident_group_key(incident);
     if let Some((mut existing, path)) = incidents(dir).await?.into_iter().find(|(candidate, _)| {
         (candidate.group_key == group_key || incident_group_key(candidate) == group_key)
@@ -697,6 +753,11 @@ async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool
             existing.evidence.drain(..existing.evidence.len() - 20);
         }
         fs::write(&path, serde_json::to_vec_pretty(&existing)?).await?;
+        if let Ok(index) = incident_index(dir).await
+            && let Err(error) = index.upsert(&existing, &path).await
+        {
+            tracing::warn!(%error, "incident JSON saved but disposable index update failed");
+        }
         return Ok((path, false));
     }
     let mut incident = incident.clone();
@@ -720,6 +781,12 @@ async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool
     use tokio::io::AsyncWriteExt;
     file.write_all(&serde_json::to_vec_pretty(&incident)?)
         .await?;
+    file.flush().await?;
+    if let Ok(index) = incident_index(dir).await
+        && let Err(error) = index.upsert(&incident, &destination).await
+    {
+        tracing::warn!(%error, "incident JSON saved but disposable index update failed");
+    }
     let entry = rescueloop_ledger::append(
         &ledger_path(dir),
         rescueloop_ledger::NewLedgerEntry {
@@ -735,6 +802,28 @@ async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool
     .await?;
     println!("LINEAGE: {:?}", entry.relation);
     Ok((destination, true))
+}
+
+async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<PathBuf> {
+    let state_root = incident_dir.parent().unwrap_or(incident_dir);
+    let directory = state_root.join("occurrences");
+    fs::create_dir_all(&directory).await?;
+    let destination = directory.join(format!("{}.json", incident.id));
+    let mut file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&destination)
+        .await
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(destination),
+        Err(error) => return Err(error.into()),
+    };
+    use tokio::io::AsyncWriteExt;
+    file.write_all(&serde_json::to_vec_pretty(incident)?)
+        .await?;
+    file.flush().await?;
+    Ok(destination)
 }
 
 fn incident_group_key(incident: &Incident) -> String {
@@ -935,6 +1024,54 @@ pub(crate) async fn repair(
     allowed_roots: Vec<PathBuf>,
     approved: bool,
 ) -> Result<()> {
+    repair_impl(
+        incident_dir,
+        incident_path,
+        analysis_path,
+        action_index,
+        allowed_roots,
+        approved,
+        true,
+    )
+    .await
+}
+
+pub(crate) async fn repair_silent(
+    incident_dir: &Path,
+    incident_path: &Path,
+    analysis_path: &Path,
+    action_index: usize,
+    allowed_roots: Vec<PathBuf>,
+    approved: bool,
+) -> Result<()> {
+    repair_impl(
+        incident_dir,
+        incident_path,
+        analysis_path,
+        action_index,
+        allowed_roots,
+        approved,
+        false,
+    )
+    .await
+}
+
+async fn repair_impl(
+    incident_dir: &Path,
+    incident_path: &Path,
+    analysis_path: &Path,
+    action_index: usize,
+    allowed_roots: Vec<PathBuf>,
+    approved: bool,
+    verbose: bool,
+) -> Result<()> {
+    macro_rules! report {
+        ($($argument:tt)*) => {
+            if verbose {
+                println!($($argument)*);
+            }
+        };
+    }
     let incident: Incident = serde_json::from_slice(&fs::read(incident_path).await?)?;
     let analysis: rescueloop_core::AnalysisResponse =
         serde_json::from_slice(&fs::read(analysis_path).await?)?;
@@ -943,9 +1080,9 @@ pub(crate) async fn repair(
         .get(action_index)
         .context("action index is out of range")?;
     if let Some(action) = rescueloop_repair::compile_operational(proposal)? {
-        println!("DRY RUN: {}", serde_json::to_string_pretty(&action)?);
+        report!("DRY RUN: {}", serde_json::to_string_pretty(&action)?);
         if !approved {
-            println!("No changes made. Approve this exact operational target to execute.");
+            report!("No changes made. Approve this exact operational target to execute.");
             return Ok(());
         }
         let target_id = match &action {
@@ -1003,7 +1140,7 @@ pub(crate) async fn repair(
         if !receipt.verified {
             anyhow::bail!("operational repair failed verification")
         }
-        println!(
+        report!(
             "VERIFIED operational repair. Receipt: {}",
             receipt_path.display()
         );
@@ -1034,9 +1171,9 @@ pub(crate) async fn repair(
         .unwrap_or(incident_dir)
         .join("transactions");
     let mut transaction = rescueloop_repair::prepare(&plan, &policy, &transaction_root).await?;
-    println!("DRY RUN: {}", serde_json::to_string_pretty(&transaction)?);
+    report!("DRY RUN: {}", serde_json::to_string_pretty(&transaction)?);
     if !approved {
-        println!("No changes made. Review the exact target and repeat with --approve to execute.");
+        report!("No changes made. Review the exact target and repeat with --approve to execute.");
         return Ok(());
     }
     let launch_context = incident
@@ -1052,7 +1189,7 @@ pub(crate) async fn repair(
     )
     .await?;
     rescueloop_repair::persist(&transaction, &transaction_root).await?;
-    println!(
+    report!(
         "APPLIED: backup created at {}",
         transaction.backup.display()
     );
@@ -1069,17 +1206,18 @@ pub(crate) async fn repair(
         Ok(result) if result.passed => {
             rescueloop_repair::finalize(&mut transaction, true).await?;
             let receipt = rescueloop_repair::persist(&transaction, &transaction_root).await?;
-            println!(
+            report!(
                 "VERIFIED: original action now succeeds ({} ms).",
                 result.duration_ms
             );
-            println!("Transaction receipt: {}", receipt.display());
+            report!("Transaction receipt: {}", receipt.display());
             record_repair_lineage(
                 incident_dir,
                 &incident,
                 &transaction,
                 rescueloop_core::IncidentStatus::VerifiedFixed,
                 serde_json::json!({"passed": true, "exit_code": result.exit_code, "duration_ms": result.duration_ms}),
+                verbose,
             )
             .await?;
         }
@@ -1096,16 +1234,17 @@ pub(crate) async fn repair(
                     )
                 })?;
             let receipt = rescueloop_repair::persist(&transaction, &transaction_root).await?;
-            println!(
+            report!(
                 "ROLLED BACK: verification failed ({replay_message}); original state restored."
             );
-            println!("Transaction receipt: {}", receipt.display());
+            report!("Transaction receipt: {}", receipt.display());
             record_repair_lineage(
                 incident_dir,
                 &incident,
                 &transaction,
                 rescueloop_core::IncidentStatus::RolledBack,
                 serde_json::json!({"passed": false, "detail": replay_message}),
+                verbose,
             )
             .await?;
         }
@@ -1119,6 +1258,7 @@ async fn record_repair_lineage(
     transaction: &rescueloop_repair::Transaction,
     status: rescueloop_core::IncidentStatus,
     verifier: serde_json::Value,
+    verbose: bool,
 ) -> Result<()> {
     let entry = rescueloop_ledger::append(
         &ledger_path(incident_dir),
@@ -1133,6 +1273,8 @@ async fn record_repair_lineage(
         },
     )
     .await?;
-    println!("LINEAGE: {:?}", entry.relation);
+    if verbose {
+        println!("LINEAGE: {:?}", entry.relation);
+    }
     Ok(())
 }

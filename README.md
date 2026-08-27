@@ -125,6 +125,20 @@ cannot add the same crash report twice.
 Equivalent active failures are grouped by their stable fingerprint. The console shows one row with
 an occurrence count and first/last observation timestamps instead of duplicating every recurrence.
 
+Versioned JSON incident documents remain the source of truth. `index-v1.db` is only a disposable
+SQLite projection used for fast ordering and future correlation queries. RescueLoop verifies the
+index, quarantines corruption, and rebuilds it from JSON; incompatible future schemas use a new
+versioned filename instead of an in-place database migration.
+
+```sh
+rescueloop index status
+rescueloop index rebuild
+```
+
+Rebuilding or deleting the index never deletes incidents, analyses, evidence, or repair history.
+Every detected event is also written once to `occurrences/<event-id>.json`; grouping updates the
+compact incident shown by the UI without erasing the immutable original occurrence.
+
 AI receives a bounded evidence packet rather than the raw incident: local artifact paths and launch
 arguments are removed, fields are allowlisted, diagnostic lines are capped, and completeness plus
 missing-evidence metadata is included. Typed repairs currently cover quarantine, cache regeneration,

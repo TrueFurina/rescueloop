@@ -12,6 +12,7 @@ crossterm.workspace = true
 rescueloop-agent = { path = "../../crates/rescueloop-agent" }
 rescueloop-core = { path = "../../crates/rescueloop-core" }
 rescueloop-ledger = { path = "../../crates/rescueloop-ledger" }
+rescueloop-index = { path = "../../crates/rescueloop-index" }
 rescueloop-platform = { path = "../../crates/rescueloop-platform" }
 rescueloop-repair = { path = "../../crates/rescueloop-repair" }
 ratatui.workspace = true

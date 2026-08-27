@@ -1,0 +1,16 @@
+[package]
+name = "rescueloop-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+rescueloop-core = { path = "../rescueloop-core" }
+rusqlite.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

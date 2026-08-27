@@ -1,6 +1,6 @@
 use crate::{
     analyze_with_provider, configured_provider, dismiss_incident, incidents, local_timestamp,
-    record_incident_status, repair,
+    record_incident_status, repair_silent,
 };
 use anyhow::Result;
 use crossterm::{
@@ -27,7 +27,7 @@ use uuid::Uuid;
 
 enum UiState {
     Ready,
-    ConfirmAnalysis,
+    ConfirmAnalysis { replace_saved: bool },
     ConfirmRepair,
     ConfirmQuit,
     Analyzing { started: Instant },
@@ -54,13 +54,18 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
         .map(|value| value.name().to_string())
         .unwrap_or_else(|| "not configured — run `rescueloop setup`".into());
     drop(provider);
+    let initial_incidents = visible_incidents(incidents(&dir).await?, false);
+    let initial_analysis = match initial_incidents.first() {
+        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+        None => None,
+    };
     let mut app = App {
-        incidents: visible_incidents(incidents(&dir).await?, false),
+        incidents: initial_incidents,
         selected: 0,
         show_details: false,
         show_repair: false,
         state: UiState::Ready,
-        analysis: None,
+        analysis: initial_analysis,
         agent_name,
         show_history: false,
     };
@@ -136,7 +141,10 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                 let refreshed = visible_incidents(incidents(&dir).await?, app.show_history);
                 if refreshed.first().map(|item| item.0.id) != newest_before {
                     app.selected = 0;
-                    app.analysis = None;
+                    app.analysis = match refreshed.first() {
+                        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+                        None => None,
+                    };
                 }
                 app.incidents = refreshed;
                 last_refresh = Instant::now();
@@ -150,18 +158,19 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            match (&app.state, key.code) {
+            let key_code = normalize_key_code(key.code);
+            match (&app.state, key_code) {
                 (UiState::ConfirmQuit, KeyCode::Char('y')) => break,
                 (UiState::ConfirmQuit, KeyCode::Char('n') | KeyCode::Esc) => {
                     app.state = UiState::Ready
                 }
-                (UiState::ConfirmAnalysis, KeyCode::Char('n') | KeyCode::Esc) => {
+                (UiState::ConfirmAnalysis { .. }, KeyCode::Char('n') | KeyCode::Esc) => {
                     app.state = UiState::Ready
                 }
                 (UiState::ConfirmRepair, KeyCode::Char('n') | KeyCode::Esc) => {
                     app.state = UiState::Ready
                 }
-                (UiState::ConfirmAnalysis, KeyCode::Char('y')) => {
+                (UiState::ConfirmAnalysis { .. }, KeyCode::Char('y')) => {
                     let Some((incident, path)) = app.incidents.get(app.selected).cloned() else {
                         continue;
                     };
@@ -232,7 +241,7 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                                 ),
                             }
                         } else {
-                            repair(&incident_dir, &incident_path, &analysis_path, 0, allowed_roots, true)
+                            repair_silent(&incident_dir, &incident_path, &analysis_path, 0, allowed_roots, true)
                                 .await
                                 .map(|_| "REPAIR WORKFLOW FINISHED\n\nThe original action was replayed. The repair was verified or automatically rolled back; a transaction receipt was saved.".to_string())
                                 .map_err(|e| e.to_string())
@@ -250,26 +259,44 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                 (_, KeyCode::Char('q')) => app.state = UiState::ConfirmQuit,
                 (_, KeyCode::Up | KeyCode::Char('k')) => {
                     app.selected = app.selected.saturating_sub(1);
-                    app.analysis = None;
+                    app.analysis = match app.incidents.get(app.selected) {
+                        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+                        None => None,
+                    };
                     app.show_repair = false;
                 }
                 (_, KeyCode::Down | KeyCode::Char('j')) => {
                     if app.selected + 1 < app.incidents.len() {
                         app.selected += 1;
                     }
-                    app.analysis = None;
+                    app.analysis = match app.incidents.get(app.selected) {
+                        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+                        None => None,
+                    };
                     app.show_repair = false;
                 }
                 (_, KeyCode::Enter) => app.show_details = !app.show_details,
+                (_, KeyCode::Char('a')) if app.analysis.is_none() => {
+                    app.state = UiState::ConfirmAnalysis {
+                        replace_saved: false,
+                    };
+                }
                 (_, KeyCode::Char('a')) => {
-                    app.state = UiState::ConfirmAnalysis;
-                    app.analysis = None;
+                    app.state = UiState::Ready;
+                }
+                (_, KeyCode::Char('u')) if app.analysis.is_some() => {
+                    app.state = UiState::ConfirmAnalysis {
+                        replace_saved: true,
+                    };
                 }
                 (_, KeyCode::Char('h')) => {
                     app.show_history = !app.show_history;
                     app.incidents = visible_incidents(incidents(&dir).await?, app.show_history);
                     app.selected = app.selected.min(app.incidents.len().saturating_sub(1));
-                    app.analysis = None;
+                    app.analysis = match app.incidents.get(app.selected) {
+                        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+                        None => None,
+                    };
                 }
                 (_, KeyCode::Char('d')) => {
                     let Some((incident, _)) = app.incidents.get(app.selected).cloned() else {
@@ -278,7 +305,10 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                     dismiss_incident(&dir, &incident).await?;
                     app.incidents = visible_incidents(incidents(&dir).await?, app.show_history);
                     app.selected = app.selected.min(app.incidents.len().saturating_sub(1));
-                    app.analysis = None;
+                    app.analysis = match app.incidents.get(app.selected) {
+                        Some((incident, _)) => load_saved_analysis(&dir, incident.id).await?,
+                        None => None,
+                    };
                     app.state = UiState::Message(
                         "DISMISSED\n\nThis item was marked as not actionable and removed from active issues. It remains available in History.".into(),
                     );
@@ -357,7 +387,7 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
 
 fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
     let area = frame.area();
-    let wide_footer = area.width >= 145;
+    let wide_footer = area.width >= 170;
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([
@@ -400,6 +430,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
                         .unwrap_or("Unknown application"),
                 ),
                 Cell::from(format!("{:?}", incident.kind)),
+                Cell::from(incident_source_label(incident)),
                 Cell::from(format!("×{}", incident.occurrence_count)),
                 Cell::from(local_timestamp(
                     incident.last_observed_at.unwrap_or(incident.observed_at),
@@ -408,18 +439,26 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             ])
         })
         .collect::<Vec<_>>();
-    let header = Row::new(["APPLICATION", "PROBLEM", "COUNT", "LOCAL TIME", "STATUS"])
-        .style(
-            Style::default()
-                .fg(Color::Yellow)
-                .add_modifier(Modifier::BOLD),
-        )
-        .bottom_margin(1);
+    let header = Row::new([
+        "APPLICATION",
+        "PROBLEM",
+        "SOURCE",
+        "COUNT",
+        "LOCAL TIME",
+        "STATUS",
+    ])
+    .style(
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD),
+    )
+    .bottom_margin(1);
     let table = Table::new(
         rows,
         [
+            Constraint::Fill(5),
             Constraint::Fill(3),
-            Constraint::Fill(4),
+            Constraint::Length(10),
             Constraint::Length(8),
             Constraint::Length(20),
             Constraint::Length(16),
@@ -456,7 +495,12 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
         body[1],
     );
     let footer = match app.state {
-        UiState::ConfirmAnalysis => " Send scrubbed evidence to AI?  [y] Yes  [n] No ".to_string(),
+        UiState::ConfirmAnalysis {
+            replace_saved: false,
+        } => " Send scrubbed evidence to AI?  [y] Yes  [n] No ".to_string(),
+        UiState::ConfirmAnalysis {
+            replace_saved: true,
+        } => " Replace the saved analysis with a fresh AI result?  [y] Re-analyze  [n] Keep saved ".to_string(),
         UiState::ConfirmRepair => " Apply this reversible repair, replay the app, and auto-rollback on failure?  [y] Apply  [n] Cancel ".to_string(),
         UiState::ConfirmQuit => {
             " Disconnect the console? The background watcher will keep running.  [y] Exit  [n] Stay ".to_string()
@@ -499,9 +543,23 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             } else {
                 "[H] History"
             };
+            let analysis_action = if app.analysis.is_some() {
+                "[A] Saved result"
+            } else {
+                "[A] Analyze"
+            };
+            let refresh_action = if app.analysis.is_some() {
+                "[U] Re-analyze"
+            } else {
+                ""
+            };
             let first = format!(
-                " {:<18}{:<23}{:<18}{:<26}",
-                "[↑↓] Select", "[Enter] Details", "[A] Analyze", context_action
+                " {:<18}{:<23}{:<20}{:<22}{:<22}",
+                "[↑↓] Select",
+                "[Enter] Details",
+                analysis_action,
+                refresh_action,
+                context_action
             );
             let second = format!(
                 "{:<18}{:<23}{:<17}",
@@ -520,6 +578,30 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &App) {
             .block(Block::default().borders(Borders::ALL)),
         chunks[2],
     );
+}
+
+async fn load_saved_analysis(
+    dir: &std::path::Path,
+    incident_id: Uuid,
+) -> Result<Option<AnalysisResponse>> {
+    let path = dir
+        .parent()
+        .unwrap_or(dir)
+        .join("analyses")
+        .join(format!("{incident_id}.json"));
+    if !tokio::fs::try_exists(&path).await? {
+        return Ok(None);
+    }
+    match tokio::fs::read(&path).await {
+        Ok(bytes) => match serde_json::from_slice(&bytes) {
+            Ok(analysis) => Ok(Some(analysis)),
+            Err(error) => {
+                tracing::warn!(path = %path.display(), %error, "ignoring invalid saved analysis");
+                Ok(None)
+            }
+        },
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn visible_incidents(
@@ -570,12 +652,13 @@ fn detail_text(app: &App) -> String {
     }
     if app.show_details {
         return format!(
-            "PROBLEM\n{}\n\nAPPLICATION\n{}\n\nTYPE\n{:?}\n\nSTATUS\n{:?}\n\nOCCURRENCES\n{}\n\nFIRST DETECTED\n{}\n\nLAST DETECTED\n{}\n\nCONFIDENCE\n{:?}\n\nEVIDENCE\n{}",
+            "PROBLEM\n{}\n\nAPPLICATION\n{}\n\nSOURCE\n{}\n\nTYPE\n{:?}\n\nSTATUS\n{:?}\n\nOCCURRENCES\n{}\n\nFIRST DETECTED\n{}\n\nLAST DETECTED\n{}\n\nCONFIDENCE\n{:?}\n\nEVIDENCE\n{}",
             incident.message,
             incident
                 .application
                 .as_deref()
                 .unwrap_or("Unknown application"),
+            incident_source_label(incident),
             incident.kind,
             incident.status,
             incident.occurrence_count,
@@ -586,15 +669,106 @@ fn detail_text(app: &App) -> String {
         );
     }
     format!(
-        "{}\n\nStatus: {:?}\nFailure: {:?}\nConfidence: {:?}\nObserved: {}\n\n{}",
+        "{}\n\nSource: {}\nStatus: {:?}\nFailure: {:?}\nConfidence: {:?}\nObserved: {}\n\n{}",
         incident
             .application
             .as_deref()
             .unwrap_or("Unknown application"),
+        incident_source_label(incident),
         incident.status,
         incident.kind,
         incident.confidence,
         local_timestamp(incident.observed_at),
         incident.message
     )
+}
+
+fn incident_source_label(incident: &Incident) -> String {
+    if let Some(engine) = incident.evidence.iter().find_map(|evidence| {
+        evidence
+            .fields
+            .get("engine")
+            .and_then(serde_json::Value::as_str)
+    }) {
+        let mut characters = engine.chars();
+        return characters
+            .next()
+            .map(|first| first.to_uppercase().collect::<String>() + characters.as_str())
+            .unwrap_or_else(|| "Container".into());
+    }
+    let source = incident
+        .evidence
+        .first()
+        .map(|evidence| evidence.source.as_str())
+        .unwrap_or_default();
+    if source.starts_with("macos") {
+        "macOS".into()
+    } else if source.starts_with("windows") {
+        "Windows".into()
+    } else if source == "supervised-process" {
+        "Process".into()
+    } else {
+        "System".into()
+    }
+}
+
+/// Terminal protocols normally expose the produced character, not the physical
+/// key. Map Ukrainian/Russian keyboard-layout characters back to RescueLoop's
+/// Latin hotkeys so switching layouts does not make the TUI appear frozen.
+fn normalize_key_code(code: KeyCode) -> KeyCode {
+    let KeyCode::Char(character) = code else {
+        return code;
+    };
+    let character = character.to_lowercase().next().unwrap_or(character);
+    let latin = match character {
+        'й' => 'q',
+        'ф' => 'a',
+        'к' => 'r',
+        'р' => 'h',
+        'в' => 'd',
+        'п' => 'g',
+        'г' => 'u',
+        'н' => 'y',
+        'т' => 'n',
+        'о' => 'j',
+        'л' => 'k',
+        value if value.is_ascii_alphabetic() => value,
+        _ => return KeyCode::Char(character),
+    };
+    KeyCode::Char(latin)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::normalize_key_code;
+    use crossterm::event::KeyCode;
+
+    #[test]
+    fn maps_cyrillic_layout_hotkeys() {
+        for (input, expected) in [
+            ('й', 'q'),
+            ('ф', 'a'),
+            ('к', 'r'),
+            ('р', 'h'),
+            ('в', 'd'),
+            ('п', 'g'),
+            ('г', 'u'),
+            ('н', 'y'),
+            ('т', 'n'),
+            ('о', 'j'),
+            ('л', 'k'),
+            ('Й', 'q'),
+        ] {
+            assert_eq!(
+                normalize_key_code(KeyCode::Char(input)),
+                KeyCode::Char(expected)
+            );
+        }
+    }
+
+    #[test]
+    fn preserves_navigation_and_normalizes_latin_case() {
+        assert_eq!(normalize_key_code(KeyCode::Up), KeyCode::Up);
+        assert_eq!(normalize_key_code(KeyCode::Char('Q')), KeyCode::Char('q'));
+    }
 }

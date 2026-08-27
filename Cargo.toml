@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/rescueloop-core", "crates/rescueloop-platform", "crates/rescueloop-agent", "crates/rescueloop-repair", "crates/rescueloop-ledger", "apps/rescueloopd"]
+members = ["crates/rescueloop-core", "crates/rescueloop-platform", "crates/rescueloop-agent", "crates/rescueloop-repair", "crates/rescueloop-ledger", "crates/rescueloop-index", "apps/rescueloopd"]
 resolver = "2"
 
 [workspace.package]
@@ -16,6 +16,7 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 notify = "8"
 crossterm = "0.28"
 ratatui = "0.29"
+rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
