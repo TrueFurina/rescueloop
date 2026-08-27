@@ -9,6 +9,9 @@ is a release gate, not an architectural assumption.
   through the native `notify` backend.
 - The detector performs no periodic recursive directory scan.
 - Artifact parsing is bounded to 40 allowlisted diagnostic lines of at most 500 characters each.
+- Crash artifacts are streamed on the blocking pool: at most 1 MiB is retained for parsing while
+  SHA-256 still covers the complete file. The in-memory artifact dedupe cache is capped at 4,096 paths.
+- The collector-to-persistence queue is capped at 256 incidents and applies backpressure during bursts.
 - AI analysis, hashing, repair planning and verification run only after an incident or explicit user
   action; none run during idle.
 - Duplicate artifacts use deterministic IDs and atomic creation.

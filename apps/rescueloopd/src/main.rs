@@ -314,7 +314,9 @@ async fn watch(dir: &Path) -> Result<()> {
     println!("Incidents: {}", dir.display());
     println!("Privacy: local detection only; AI analysis starts only on request");
     println!("Waiting for a new failure event...\n");
-    let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    // Bound memory during crash storms. Each collector naturally pauses while
+    // persistence catches up instead of growing an unbounded process queue.
+    let (sender, mut events) = tokio::sync::mpsc::channel(256);
     let health = Arc::new(WatchHealth::default());
     let heartbeat_sources = source_names.len();
     let heartbeat_health = Arc::clone(&health);
@@ -371,7 +373,7 @@ async fn watch(dir: &Path) -> Result<()> {
                             "Failure observation received"
                         );
                         health.observation_received();
-                        if sender.send(incident).is_err() {
+                        if sender.send(incident).await.is_err() {
                             info!(
                                 event = "source.stopped",
                                 source = source.name(),
