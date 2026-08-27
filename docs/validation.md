@@ -8,6 +8,7 @@
 - Restart loop: three exits grouped into one incident with `occurrence_count = 3` and upgraded classification.
 - Observation crash recovery: `scripts/validate-observation-recovery.sh` aborts a process after
   durable occurrence publication, then proves the next ingestion replays the journal exactly once.
+  The Windows native E2E performs the same failpoint/replay/count assertions with `cmd.exe`.
 - Container-source unit gates cover oversized event resynchronization, bounded command-output
   draining, command deadline termination, container-ID validation and bounded restart history.
 - Every watcher exit path is funneled through cancellation and task joining. Persistence failure,

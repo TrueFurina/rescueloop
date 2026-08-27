@@ -39,6 +39,22 @@ try {
     if (@($LogRecords.run_id | Sort-Object -Unique).Count -lt 3) {
         throw "expected distinct run IDs across process restarts"
     }
+    $env:RESCUELOOP_TEST_ABORT_AFTER_OCCURRENCE = "1"
+    & cargo run --quiet -p rescueloop -- --incident-dir $Incidents run cmd.exe /c exit 43 2>$null
+    Remove-Item Env:RESCUELOOP_TEST_ABORT_AFTER_OCCURRENCE
+    if ($LASTEXITCODE -eq 0) { throw "expected observation failpoint abort" }
+    $Pending = @(Get-ChildItem (Join-Path $Root "observation-journal") -Filter *.json)
+    if ($Pending.Count -ne 1) { throw "expected one pending observation transaction" }
+    & cargo run --quiet -p rescueloop -- --incident-dir $Incidents run cmd.exe /c exit 43
+    if ($LASTEXITCODE -ne 0) { throw "observation recovery command failed" }
+    $Pending = @(Get-ChildItem (Join-Path $Root "observation-journal") -Filter *.json)
+    if ($Pending.Count -ne 0) { throw "observation journal was not drained" }
+    $Recovered = @(Get-ChildItem $Incidents -Filter *.json | ForEach-Object {
+        Get-Content $_.FullName -Raw | ConvertFrom-Json
+    } | Where-Object { $_.normalized_failure.code -eq "exit:43" })
+    if ($Recovered.Count -ne 1 -or $Recovered[0].occurrence_count -ne 2) {
+        throw "observation recovery was not idempotent"
+    }
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents logs --verify --lines 0
     if ($LASTEXITCODE -ne 0) { throw "log integrity verification failed" }
     & cargo run --quiet -p rescueloop -- service status
