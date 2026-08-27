@@ -1341,6 +1341,7 @@ dependencies = [
  "flate2",
  "libc",
  "ratatui",
+ "reqwest",
  "rescueloop-agent",
  "rescueloop-core",
  "rescueloop-index",
@@ -1365,6 +1366,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tokio",
+ "tracing",
 ]
 
 [[package]]
@@ -1391,6 +1393,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1406,6 +1409,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1422,6 +1426,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
@@ -1436,6 +1441,7 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
+ "tracing",
  "uuid",
 ]
 
