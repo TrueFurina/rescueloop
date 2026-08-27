@@ -30,6 +30,13 @@ Endpoint Security and application-specific health probes remain future integrati
 The background collector is event-driven rather than polling. See the explicit
 [performance budget](docs/performance-budget.md).
 
+## Operational logs
+
+Structured JSONL operational events are written to `.rescueloop/logs` with
+daily rotation and bounded retention. Inspect them with `rescueloop logs` or
+`rescueloop logs --lines 250`. Configure verbosity with `RUST_LOG` and retention
+with `RESCUELOOP_LOG_RETENTION_DAYS`. See the [logging contract](docs/logging.md).
+
 ## Run
 
 ```sh

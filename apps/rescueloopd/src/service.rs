@@ -157,8 +157,6 @@ pub async fn install_system(incident_dir: &Path) -> Result<()> {
         let executable = std::env::current_exe()?;
         let incident_dir = absolute(incident_dir)?;
         let plist = PathBuf::from("/Library/LaunchDaemons").join(format!("{LABEL}.plist"));
-        let log_dir = PathBuf::from("/Library/Logs/RescueLoop");
-        fs::create_dir_all(&log_dir).await?;
         let path = std::env::var("PATH").unwrap_or_else(|_| {
             "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into()
         });
@@ -176,8 +174,8 @@ pub async fn install_system(incident_dir: &Path) -> Result<()> {
             xml(&executable),
             xml(&incident_dir),
             escape_xml_text(&path),
-            xml(&log_dir.join("watch.log")),
-            xml(&log_dir.join("watch-error.log"))
+            "/dev/null",
+            "/dev/null"
         );
         fs::write(&plist, content).await?;
         use std::os::unix::fs::PermissionsExt;
@@ -298,9 +296,6 @@ async fn install_macos(executable: &Path, incident_dir: &Path) -> Result<()> {
     let plist = macos_plist()?;
     let parent = plist.parent().context("LaunchAgents path has no parent")?;
     fs::create_dir_all(parent).await?;
-    let state_root = incident_dir.parent().unwrap_or(incident_dir);
-    let log_dir = state_root.join("logs");
-    fs::create_dir_all(&log_dir).await?;
     let path = std::env::var("PATH")
         .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin".into());
     let content = format!(
@@ -323,8 +318,8 @@ async fn install_macos(executable: &Path, incident_dir: &Path) -> Result<()> {
         path.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;"),
-        xml(&log_dir.join("watch.log")),
-        xml(&log_dir.join("watch-error.log")),
+        "/dev/null",
+        "/dev/null",
     );
     fs::write(&plist, content).await?;
     let domain = format!("gui/{}", unsafe { libc::getuid() });

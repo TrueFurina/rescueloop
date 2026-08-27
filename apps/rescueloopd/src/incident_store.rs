@@ -150,6 +150,13 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
             existing.evidence.drain(..existing.evidence.len() - 20);
         }
         fs::write(&path, serde_json::to_vec_pretty(&existing)?).await?;
+        tracing::info!(
+            event = "incident.updated",
+            incident_id = %existing.id,
+            occurrence_count = existing.occurrence_count,
+            evidence_count = existing.evidence.len(),
+            "Active incident updated"
+        );
         if let Ok(index) = incident_index(dir).await
             && let Err(error) = index.upsert(&existing, &path).await
         {
@@ -179,6 +186,13 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     file.write_all(&serde_json::to_vec_pretty(&incident)?)
         .await?;
     file.flush().await?;
+    tracing::info!(
+        event = "incident.created",
+        incident_id = %incident.id,
+        kind = ?incident.kind,
+        evidence_count = incident.evidence.len(),
+        "Incident JSON created"
+    );
     if let Ok(index) = incident_index(dir).await
         && let Err(error) = index.upsert(&incident, &destination).await
     {
@@ -197,6 +211,12 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
         },
     )
     .await?;
+    tracing::info!(
+        event = "lineage.appended",
+        incident_id = %incident.id,
+        relation = ?entry.relation,
+        "Incident lineage appended"
+    );
     println!("LINEAGE: {:?}", entry.relation);
     Ok((destination, true))
 }
@@ -220,6 +240,11 @@ async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<Pat
     file.write_all(&serde_json::to_vec_pretty(incident)?)
         .await?;
     file.flush().await?;
+    tracing::debug!(
+        event = "occurrence.created",
+        incident_id = %incident.id,
+        "Immutable occurrence created"
+    );
     Ok(destination)
 }
 
@@ -263,6 +288,7 @@ pub(crate) async fn record_incident_status(
     status: rescueloop_core::IncidentStatus,
     detail: Option<serde_json::Value>,
 ) -> Result<()> {
+    let status_for_log = status.clone();
     rescueloop_ledger::append(
         &ledger_path(incident_dir),
         rescueloop_ledger::NewLedgerEntry {
@@ -276,5 +302,11 @@ pub(crate) async fn record_incident_status(
         },
     )
     .await?;
+    tracing::info!(
+        event = "incident.status_changed",
+        incident_id = %incident.id,
+        status = ?status_for_log,
+        "Incident status recorded"
+    );
     Ok(())
 }

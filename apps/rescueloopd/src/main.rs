@@ -5,10 +5,11 @@ use rescueloop_core::{AnalysisProvider, AnalysisRequest, Incident};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::fs;
-use tracing::info;
+use tracing::{error, info};
 
 mod console;
 mod incident_store;
+mod logging;
 mod repair_flow;
 mod service;
 mod tui;
@@ -52,6 +53,11 @@ enum Command {
     Index {
         #[command(subcommand)]
         action: IndexAction,
+    },
+    /// Show recent structured operational events.
+    Logs {
+        #[arg(long, default_value_t = 100)]
+        lines: usize,
     },
     /// Connect to the background detector through the local incident store.
     Console {
@@ -120,10 +126,30 @@ enum IndexAction {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
     let cli = Cli::parse();
+    let _log_guard = logging::init(&cli.incident_dir)?;
+    let command = cli.command.as_ref().map_or("tui", Command::name);
+    info!(
+        event = "runtime.started",
+        version = env!("CARGO_PKG_VERSION"),
+        command,
+        pid = std::process::id(),
+        "RescueLoop started"
+    );
+    let result = run(cli).await;
+    match &result {
+        Ok(()) => info!(event = "runtime.stopped", command, "RescueLoop stopped"),
+        Err(error) => error!(
+            event = "runtime.failed",
+            command,
+            error = %format!("{error:#}"),
+            "RescueLoop failed"
+        ),
+    }
+    result
+}
+
+async fn run(cli: Cli) -> Result<()> {
     match cli.command {
         None => tui::run(cli.incident_dir, None, None).await,
         Some(Command::Watch) => watch(&cli.incident_dir).await,
@@ -137,6 +163,7 @@ async fn main() -> Result<()> {
         Some(Command::Setup) => setup(&cli.incident_dir).await,
         Some(Command::Sources { action }) => sources(&cli.incident_dir, action).await,
         Some(Command::Index { action }) => index_command(&cli.incident_dir, action).await,
+        Some(Command::Logs { lines }) => logging::print_recent(&cli.incident_dir, lines).await,
         Some(Command::Console {
             endpoint,
             token,
@@ -180,11 +207,34 @@ async fn main() -> Result<()> {
     }
 }
 
+impl Command {
+    fn name(&self) -> &'static str {
+        match self {
+            Self::Watch => "watch",
+            Self::Service { .. } => "service",
+            Self::Setup => "setup",
+            Self::Sources { .. } => "sources",
+            Self::Index { .. } => "index",
+            Self::Logs { .. } => "logs",
+            Self::Console { .. } => "console",
+            Self::Analyze { .. } => "analyze",
+            Self::Run { .. } => "run",
+            Self::Replay { .. } => "replay",
+            Self::Repair { .. } => "repair",
+        }
+    }
+}
+
 async fn watch(dir: &Path) -> Result<()> {
     fs::create_dir_all(dir).await?;
     let settings = load_settings(dir).await?;
     let sources = rescueloop_platform::event_sources(&settings.enabled_sources)?;
     let source_names: Vec<_> = sources.iter().map(|source| source.name()).collect();
+    info!(
+        event = "watch.ready",
+        sources = ?source_names,
+        "Watcher initialized"
+    );
     println!("RescueLoop {}", env!("CARGO_PKG_VERSION"));
     println!("Status: READY — monitoring for objective failures");
     println!(
@@ -197,21 +247,67 @@ async fn watch(dir: &Path) -> Result<()> {
     println!("Privacy: local detection only; AI analysis starts only on request");
     println!("Waiting for a new failure event...\n");
     let (sender, mut events) = tokio::sync::mpsc::unbounded_channel();
+    let heartbeat_sources = source_names.len();
+    let heartbeat = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(Duration::from_secs(60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            info!(
+                event = "watch.heartbeat",
+                source_count = heartbeat_sources,
+                "Watcher is alive"
+            );
+        }
+    });
     for mut source in sources {
         let sender = sender.clone();
         tokio::spawn(async move {
-            info!(source = source.name(), "event source started");
+            info!(
+                event = "source.started",
+                source = source.name(),
+                "Event source started"
+            );
             let mut retry_delay = Duration::from_secs(2);
+            let mut degraded = false;
             loop {
                 match source.next_incident().await {
                     Ok(incident) => {
+                        if degraded {
+                            info!(
+                                event = "source.recovered",
+                                source = source.name(),
+                                "Event source recovered"
+                            );
+                            degraded = false;
+                        }
                         retry_delay = Duration::from_secs(2);
+                        info!(
+                            event = "observation.received",
+                            source = source.name(),
+                            incident_id = %incident.id,
+                            kind = ?incident.kind,
+                            "Failure observation received"
+                        );
                         if sender.send(incident).is_err() {
+                            info!(
+                                event = "source.stopped",
+                                source = source.name(),
+                                reason = "receiver_closed",
+                                "Event source stopped"
+                            );
                             break;
                         }
                     }
                     Err(error) => {
-                        tracing::warn!(source = source.name(), %error, "event source reconnecting");
+                        degraded = true;
+                        tracing::warn!(
+                            event = "source.retrying",
+                            source = source.name(),
+                            error = %format!("{error:#}"),
+                            retry_delay_ms = retry_delay.as_millis(),
+                            "Event source failed; reconnecting"
+                        );
                         tokio::time::sleep(retry_delay).await;
                         retry_delay = (retry_delay * 2).min(Duration::from_secs(60));
                     }
@@ -223,8 +319,15 @@ async fn watch(dir: &Path) -> Result<()> {
     while let Some(incident) = events.recv().await {
         let (destination, created) = save_incident(dir, &incident).await?;
         if !created {
+            info!(event = "incident.grouped", incident_id = %incident.id, "Incident grouped with an active failure");
             continue;
         }
+        info!(
+            event = "incident.persisted",
+            incident_id = %incident.id,
+            kind = ?incident.kind,
+            "New incident persisted"
+        );
         println!("DETECTED: {:?}: {}", incident.kind, incident.message);
         println!("Incident saved to {}", destination.display());
         println!(
@@ -232,6 +335,11 @@ async fn watch(dir: &Path) -> Result<()> {
             destination.display()
         );
     }
+    heartbeat.abort();
+    error!(
+        event = "watch.sources_exhausted",
+        "All event sources stopped"
+    );
     anyhow::bail!("all event sources stopped")
 }
 
@@ -242,9 +350,13 @@ async fn run_supervised(
     record_args: bool,
 ) -> Result<()> {
     match rescueloop_platform::supervise(&executable, &args, record_args).await? {
-        None => println!("PASSED: original action exited successfully; no incident created."),
+        None => {
+            info!(event = "supervision.passed", "Supervised action succeeded");
+            println!("PASSED: original action exited successfully; no incident created.")
+        }
         Some(incident) => {
             let (destination, _) = save_incident(dir, &incident).await?;
+            info!(event = "supervision.failed", incident_id = %incident.id, kind = ?incident.kind, "Supervised action produced an incident");
             println!("DETECTED: {:?}: {}", incident.kind, incident.message);
             println!("Incident saved to {}", destination.display());
             if record_args {
@@ -267,6 +379,14 @@ async fn replay(path: &Path) -> Result<()> {
         .launch_context
         .context("incident has no launch context")?;
     let result = rescueloop_platform::verify_replay(&context).await?;
+    info!(
+        event = "verification.completed",
+        incident_id = %incident.id,
+        passed = result.passed,
+        exit_code = ?result.exit_code,
+        duration_ms = result.duration_ms,
+        "Replay verification completed"
+    );
     println!("{}", serde_json::to_string_pretty(&result)?);
     if result.passed {
         println!("VERIFIED: the exact recorded action now succeeds.");
@@ -306,10 +426,37 @@ pub(crate) async fn analyze_with_provider(
         .filter(|action| cfg!(unix) || *action != "set_permission")
         .map(str::to_string)
         .collect();
+    info!(
+        event = "analysis.started",
+        incident_id = %incident.id,
+        provider = provider.name(),
+        "Analysis started"
+    );
+    let incident_id = incident.id;
     let request = AnalysisRequest::bounded(incident, allowed_actions);
-    let response = provider.analyze(&request).await?;
+    let response = match provider.analyze(&request).await {
+        Ok(response) => response,
+        Err(error) => {
+            error!(
+                event = "analysis.failed",
+                incident_id = %incident_id,
+                provider = provider.name(),
+                error = %error,
+                "Analysis failed"
+            );
+            return Err(error.into());
+        }
+    };
     if let Some(output) = output {
         fs::write(output, serde_json::to_vec_pretty(&response)?).await?;
     }
+    info!(
+        event = "analysis.completed",
+        incident_id = %incident_id,
+        provider = provider.name(),
+        proposed_actions = response.proposed_actions.len(),
+        needs_more_evidence = response.needs_more_evidence,
+        "Analysis completed"
+    );
     Ok(response)
 }

@@ -68,9 +68,17 @@ async fn repair_impl(
         .proposed_actions
         .get(action_index)
         .context("action index is out of range")?;
+    tracing::info!(
+        event = "repair.planned",
+        incident_id = %incident.id,
+        action_type = proposal.action_type,
+        approved,
+        "Repair proposal compiled"
+    );
     if let Some(action) = rescueloop_repair::compile_operational(proposal)? {
         report!("DRY RUN: {}", serde_json::to_string_pretty(&action)?);
         if !approved {
+            tracing::info!(event = "repair.dry_run", incident_id = %incident.id, action_type = proposal.action_type, "Operational repair reviewed without execution");
             report!("No changes made. Approve this exact operational target to execute.");
             return Ok(());
         }
@@ -99,6 +107,14 @@ async fn repair_impl(
         )
         .await?;
         let receipt = rescueloop_repair::execute_operational(action, &target_id).await?;
+        tracing::info!(
+            event = "repair.executed",
+            incident_id = %incident.id,
+            action_type = proposal.action_type,
+            verified = receipt.verified,
+            rolled_back = receipt.rolled_back,
+            "Operational repair executed"
+        );
         record_incident_status(
             incident_dir,
             &incident,
@@ -162,6 +178,7 @@ async fn repair_impl(
     let mut transaction = rescueloop_repair::prepare(&plan, &policy, &transaction_root).await?;
     report!("DRY RUN: {}", serde_json::to_string_pretty(&transaction)?);
     if !approved {
+        tracing::info!(event = "repair.dry_run", incident_id = %incident.id, action_type = proposal.action_type, "Filesystem repair reviewed without execution");
         report!("No changes made. Review the exact target and repeat with --approve to execute.");
         return Ok(());
     }
@@ -170,6 +187,13 @@ async fn repair_impl(
         .clone()
         .context("verified repair requires an exact recorded launch context")?;
     rescueloop_repair::apply(&mut transaction).await?;
+    tracing::info!(
+        event = "repair.applied",
+        incident_id = %incident.id,
+        transaction_id = %transaction.id,
+        action_type = proposal.action_type,
+        "Repair transaction applied"
+    );
     record_incident_status(
         incident_dir,
         &incident,
@@ -209,6 +233,13 @@ async fn repair_impl(
                 verbose,
             )
             .await?;
+            tracing::info!(
+                event = "repair.verified",
+                incident_id = %incident.id,
+                transaction_id = %transaction.id,
+                duration_ms = result.duration_ms,
+                "Repair verified"
+            );
         }
         result => {
             let replay_message = match result {
@@ -236,6 +267,13 @@ async fn repair_impl(
                 verbose,
             )
             .await?;
+            tracing::warn!(
+                event = "repair.rolled_back",
+                incident_id = %incident.id,
+                transaction_id = %transaction.id,
+                reason = replay_message,
+                "Repair failed verification and was rolled back"
+            );
         }
     }
     Ok(())
