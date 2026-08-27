@@ -2,18 +2,31 @@ use anyhow::{Context, Result};
 use std::path::{Path, PathBuf};
 use tracing_subscriber::EnvFilter;
 
+mod writer;
+
+use writer::{LogHealth, RollingWriter, WriterConfig};
+
 const DEFAULT_FILTER: &str = "info,hyper=warn,reqwest=warn,rustls=warn";
 const DEFAULT_RETENTION_DAYS: usize = 14;
+const DEFAULT_MAX_FILE_BYTES: u64 = 10 * 1024 * 1024;
 
-pub struct LogGuard;
+pub struct LogGuard {
+    health: LogHealth,
+}
 
 pub fn init(incident_dir: &Path) -> Result<LogGuard> {
     let directory = log_directory(incident_dir);
     std::fs::create_dir_all(&directory)
         .with_context(|| format!("cannot create log directory: {}", directory.display()))?;
     let retention_days = retention_days();
-    prune(&directory, retention_days)?;
-    let appender = tracing_appender::rolling::daily(&directory, "rescueloop.jsonl");
+    let config = WriterConfig {
+        directory: directory.clone(),
+        max_file_bytes: max_file_bytes(),
+        retention_days,
+        compress_rotated: true,
+    };
+    let appender = RollingWriter::new(config)?;
+    let health = appender.health();
     let filter = std::env::var("RUST_LOG")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -38,7 +51,13 @@ pub fn init(incident_dir: &Path) -> Result<LogGuard> {
         format = "jsonl",
         "Operational logging initialized"
     );
-    Ok(LogGuard)
+    Ok(LogGuard { health })
+}
+
+impl LogGuard {
+    pub fn write_errors(&self) -> u64 {
+        self.health.write_errors()
+    }
 }
 
 pub fn log_directory(incident_dir: &Path) -> PathBuf {
@@ -53,25 +72,12 @@ fn retention_days() -> usize {
         .unwrap_or(DEFAULT_RETENTION_DAYS)
 }
 
-fn prune(directory: &Path, retention_days: usize) -> Result<()> {
-    let mut files = std::fs::read_dir(directory)?
-        .filter_map(|entry| entry.ok())
-        .filter(|entry| {
-            entry.file_type().is_ok_and(|kind| kind.is_file())
-                && entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("rescueloop.jsonl")
-        })
-        .map(|entry| entry.path())
-        .collect::<Vec<_>>();
-    files.sort();
-    let remove_count = files.len().saturating_sub(retention_days);
-    for path in files.into_iter().take(remove_count) {
-        std::fs::remove_file(&path)
-            .with_context(|| format!("cannot remove expired log: {}", path.display()))?;
-    }
-    Ok(())
+fn max_file_bytes() -> u64 {
+    std::env::var("RESCUELOOP_LOG_MAX_BYTES")
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .filter(|value| *value >= 1024)
+        .unwrap_or(DEFAULT_MAX_FILE_BYTES)
 }
 
 pub async fn print_recent(incident_dir: &Path, line_limit: usize) -> Result<()> {
@@ -85,7 +91,11 @@ pub async fn print_recent(incident_dir: &Path, line_limit: usize) -> Result<()> 
             && entry
                 .file_name()
                 .to_string_lossy()
-                .starts_with("rescueloop.jsonl")
+                .starts_with("rescueloop-")
+            && entry
+                .path()
+                .extension()
+                .is_some_and(|value| value == "jsonl")
         {
             files.push(entry.path());
         }
@@ -118,9 +128,8 @@ fn install_panic_hook() {
 
 #[cfg(test)]
 mod tests {
-    use super::{log_directory, prune};
-    use std::{fs, path::Path};
-    use uuid::Uuid;
+    use super::log_directory;
+    use std::path::Path;
 
     #[test]
     fn stores_logs_next_to_incident_state() {
@@ -128,22 +137,5 @@ mod tests {
             log_directory(Path::new("state/incidents")),
             Path::new("state/logs")
         );
-    }
-
-    #[test]
-    fn removes_logs_beyond_retention() {
-        let directory =
-            std::env::temp_dir().join(format!("rescueloop-log-test-{}", Uuid::new_v4()));
-        fs::create_dir_all(&directory).unwrap();
-        for date in ["2026-01-01", "2026-01-02", "2026-01-03"] {
-            fs::write(directory.join(format!("rescueloop.jsonl.{date}")), "{}\n").unwrap();
-        }
-
-        prune(&directory, 2).unwrap();
-
-        assert!(!directory.join("rescueloop.jsonl.2026-01-01").exists());
-        assert!(directory.join("rescueloop.jsonl.2026-01-02").exists());
-        assert!(directory.join("rescueloop.jsonl.2026-01-03").exists());
-        fs::remove_dir_all(directory).unwrap();
     }
 }

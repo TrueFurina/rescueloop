@@ -138,7 +138,12 @@ async fn main() -> Result<()> {
     );
     let result = run(cli).await;
     match &result {
-        Ok(()) => info!(event = "runtime.stopped", command, "RescueLoop stopped"),
+        Ok(()) => info!(
+            event = "runtime.stopped",
+            command,
+            log_write_errors = _log_guard.write_errors(),
+            "RescueLoop stopped"
+        ),
         Err(error) => error!(
             event = "runtime.failed",
             command,

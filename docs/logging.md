@@ -7,11 +7,13 @@ RescueLoop writes structured JSON Lines logs independently from terminal output.
 Logs are stored next to the state directories:
 
 ```text
-.rescueloop/logs/rescueloop.jsonl.YYYY-MM-DD
+.rescueloop/logs/rescueloop-YYYY-MM-DD-NNNN.jsonl
 ```
 
-Files rotate daily. The newest 14 daily files are retained by default. Set
-`RESCUELOOP_LOG_RETENTION_DAYS` to a positive integer to change retention.
+Files rotate daily or after 10 MiB, whichever comes first. Rotated files are
+compressed with gzip. Files older than 14 days are removed. Set
+`RESCUELOOP_LOG_RETENTION_DAYS` to change retention and
+`RESCUELOOP_LOG_MAX_BYTES` to change the size threshold.
 
 Use the CLI to inspect the latest file:
 
