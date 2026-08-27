@@ -8,6 +8,10 @@ use std::{
     fs::File,
     io::{BufReader, Read},
     path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 use tokio::{
     sync::mpsc,
@@ -20,12 +24,17 @@ pub struct ArtifactWatcher {
     extensions: HashSet<String>,
     seen: HashSet<PathBuf>,
     seen_order: VecDeque<PathBuf>,
-    events: mpsc::UnboundedReceiver<PathBuf>,
+    roots: Vec<PathBuf>,
+    events: mpsc::Receiver<PathBuf>,
+    overflowed: Arc<AtomicBool>,
+    reconciliation: Option<mpsc::Receiver<PathBuf>>,
     _watcher: RecommendedWatcher,
 }
 
 const MAX_SEEN_PATHS: usize = 4_096;
 const MAX_DIAGNOSTIC_BYTES: usize = 1024 * 1024;
+const EVENT_QUEUE_CAPACITY: usize = 1_024;
+const RECONCILIATION_CAPACITY: usize = 256;
 
 impl ArtifactWatcher {
     pub fn new(
@@ -34,19 +43,24 @@ impl ArtifactWatcher {
         roots: Vec<PathBuf>,
         extensions: &[&str],
     ) -> Result<Self> {
-        let (sender, events) = mpsc::unbounded_channel();
+        let (sender, events) = mpsc::channel(EVENT_QUEUE_CAPACITY);
+        let overflowed = Arc::new(AtomicBool::new(false));
+        let callback_overflowed = Arc::clone(&overflowed);
         let mut watcher =
-            notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-                if let Ok(event) = event {
+            notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
+                Ok(event) => {
                     for path in event.paths {
-                        let _ = sender.send(path);
+                        if sender.try_send(path).is_err() {
+                            callback_overflowed.store(true, Ordering::Release);
+                        }
                     }
                 }
+                Err(_) => callback_overflowed.store(true, Ordering::Release),
             })
             .context("failed to initialize native filesystem event watcher")?;
         let mut watched = 0;
-        for root in roots {
-            if root.is_dir() && watcher.watch(&root, RecursiveMode::Recursive).is_ok() {
+        for root in &roots {
+            if root.is_dir() && watcher.watch(root, RecursiveMode::Recursive).is_ok() {
                 watched += 1;
             }
         }
@@ -59,7 +73,10 @@ impl ArtifactWatcher {
             extensions: extensions.iter().map(|x| x.to_string()).collect(),
             seen: HashSet::new(),
             seen_order: VecDeque::new(),
+            roots,
             events,
+            overflowed,
+            reconciliation: None,
             _watcher: watcher,
         })
     }
@@ -80,6 +97,72 @@ impl ArtifactWatcher {
         tokio::task::spawn_blocking(move || build_incident(name, platform, path))
             .await
             .context("diagnostic artifact worker stopped")?
+    }
+
+    fn start_reconciliation(&mut self) {
+        let roots = self.roots.clone();
+        let extensions = self.extensions.clone();
+        let seen = self.seen.clone();
+        let (sender, receiver) = mpsc::channel(RECONCILIATION_CAPACITY);
+        self.reconciliation = Some(receiver);
+        tokio::task::spawn_blocking(move || scan_reports(&roots, &extensions, &seen, sender));
+    }
+
+    async fn next_path(&mut self) -> Result<PathBuf> {
+        loop {
+            if let Some(reconciliation) = &mut self.reconciliation {
+                if let Some(path) = reconciliation.recv().await {
+                    return Ok(path);
+                }
+                self.reconciliation = None;
+                continue;
+            }
+            if self.overflowed.swap(false, Ordering::AcqRel) {
+                tracing::warn!(
+                    event = "source.overflow_reconciling",
+                    source = self.name,
+                    "Native artifact event queue overflowed; reconciling watched roots"
+                );
+                self.start_reconciliation();
+                continue;
+            }
+            return self
+                .events
+                .recv()
+                .await
+                .context("native filesystem event stream closed");
+        }
+    }
+}
+
+fn scan_reports(
+    roots: &[PathBuf],
+    extensions: &HashSet<String>,
+    seen: &HashSet<PathBuf>,
+    sender: mpsc::Sender<PathBuf>,
+) {
+    let mut pending = roots.to_vec();
+    while let Some(directory) = pending.pop() {
+        let Ok(entries) = std::fs::read_dir(directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() && !file_type.is_symlink() {
+                pending.push(path);
+                continue;
+            }
+            let supported = path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|value| extensions.contains(&value.to_ascii_lowercase()));
+            if supported && !seen.contains(&path) && sender.blocking_send(path).is_err() {
+                return;
+            }
+        }
     }
 }
 
@@ -191,11 +274,7 @@ impl IncidentCollector for ArtifactWatcher {
     }
     async fn next_incident(&mut self) -> Result<Incident> {
         loop {
-            let path = self
-                .events
-                .recv()
-                .await
-                .context("native filesystem event stream closed")?;
+            let path = self.next_path().await?;
             let supported = path
                 .extension()
                 .and_then(|x| x.to_str())
@@ -215,7 +294,18 @@ impl IncidentCollector for ArtifactWatcher {
                 continue;
             }
             self.remember(path.clone());
-            let incident = self.to_incident(path).await?;
+            let incident = match self.to_incident(path).await {
+                Ok(incident) => incident,
+                Err(error) => {
+                    tracing::warn!(
+                        event = "source.artifact_unreadable",
+                        source = self.name,
+                        error = %error,
+                        "Diagnostic artifact could not be normalized"
+                    );
+                    continue;
+                }
+            };
             if is_rescueloop(incident.application.as_deref()) {
                 continue;
             }
@@ -264,7 +354,7 @@ mod tests {
 
     #[test]
     fn bounds_seen_path_cache() {
-        let (_sender, events) = tokio::sync::mpsc::unbounded_channel();
+        let (_sender, events) = tokio::sync::mpsc::channel(1);
         let root = std::env::temp_dir();
         let watcher = notify::recommended_watcher(|_| {}).unwrap();
         let mut source = ArtifactWatcher {
@@ -273,7 +363,10 @@ mod tests {
             extensions: HashSet::new(),
             seen: HashSet::new(),
             seen_order: Default::default(),
+            roots: Vec::new(),
             events,
+            overflowed: Default::default(),
+            reconciliation: None,
             _watcher: watcher,
         };
         for index in 0..MAX_SEEN_PATHS + 10 {
@@ -281,5 +374,27 @@ mod tests {
         }
         assert_eq!(source.seen.len(), MAX_SEEN_PATHS);
         assert!(!source.seen.contains(&root.join("0")));
+    }
+
+    #[tokio::test]
+    async fn overflow_reconciliation_streams_unseen_reports() {
+        let root = std::env::temp_dir().join(format!("rescueloop-scan-{}", uuid::Uuid::new_v4()));
+        let nested = root.join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        let report = nested.join("demo.crash");
+        fs::write(&report, b"Exception: boom").unwrap();
+        fs::write(nested.join("ignored.txt"), b"ignored").unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
+        let roots = vec![root.clone()];
+        let extensions = HashSet::from(["crash".to_string()]);
+
+        tokio::task::spawn_blocking(move || {
+            super::scan_reports(&roots, &extensions, &HashSet::new(), sender)
+        })
+        .await
+        .unwrap();
+        assert_eq!(receiver.recv().await, Some(report));
+        assert!(receiver.recv().await.is_none());
+        fs::remove_dir_all(root).unwrap();
     }
 }

@@ -12,6 +12,9 @@ is a release gate, not an architectural assumption.
 - Crash artifacts are streamed on the blocking pool: at most 1 MiB is retained for parsing while
   SHA-256 still covers the complete file. The in-memory artifact dedupe cache is capped at 4,096 paths.
 - The collector-to-persistence queue is capped at 256 incidents and applies backpressure during bursts.
+- Native artifact callbacks use a 1,024-path bounded queue. Overflow triggers a recursive
+  reconciliation whose scanner streams through a 256-path bounded channel, so recovery does not
+  materialize the watched directory tree in memory.
 - AI analysis, hashing, repair planning and verification run only after an incident or explicit user
   action; none run during idle.
 - Duplicate artifacts use deterministic IDs and atomic creation.
