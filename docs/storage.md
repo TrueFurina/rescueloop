@@ -21,6 +21,8 @@ replacement uses `MoveFileExW` with replace and write-through flags.
 Grouping, projection replacement, index update and initial lineage append are serialized by a
 cross-process incident-store lock. Concurrent collectors therefore cannot lose occurrence-count or
 evidence updates.
+Occurrence creation is idempotent by UUID. Re-delivery of the same native event returns the existing
+projection without incrementing its count or duplicating evidence.
 
 ## Disposable index
 

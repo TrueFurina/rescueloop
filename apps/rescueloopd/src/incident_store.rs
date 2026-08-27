@@ -143,10 +143,22 @@ pub(crate) async fn incident_by_number(dir: &Path, number: &str) -> Result<Incid
 
 pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     fs::create_dir_all(dir).await?;
-    save_occurrence(dir, incident).await?;
+    let (_, occurrence_created) = save_occurrence(dir, incident).await?;
     let _store_lock = acquire_store_lock(dir).await?;
     let group_key = incident_group_key(incident);
     let candidates = grouping_candidates(dir, &group_key).await?;
+    if !occurrence_created
+        && let Some((_, path)) = candidates.iter().find(|(candidate, _)| {
+            candidate.group_key == group_key || incident_group_key(candidate) == group_key
+        })
+    {
+        tracing::debug!(
+            event = "occurrence.duplicate",
+            incident_id = %incident.id,
+            "Duplicate occurrence ignored"
+        );
+        return Ok((path.clone(), false));
+    }
     if let Some((mut existing, path)) = candidates.into_iter().find(|(candidate, _)| {
         (candidate.group_key == group_key || incident_group_key(candidate) == group_key)
             && !matches!(
@@ -264,18 +276,22 @@ async fn grouping_candidates(dir: &Path, group_key: &str) -> Result<Vec<(Inciden
     incidents(dir).await
 }
 
-async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<PathBuf> {
+async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<(PathBuf, bool)> {
     let state_root = incident_dir.parent().unwrap_or(incident_dir);
     let directory = state_root.join("occurrences");
     fs::create_dir_all(&directory).await?;
     let destination = directory.join(format!("{}.json", incident.id));
-    let _ = storage::create_durable(&destination, &serde_json::to_vec_pretty(incident)?).await?;
+    let created =
+        storage::create_durable(&destination, &serde_json::to_vec_pretty(incident)?).await?;
+    if !created {
+        return Ok((destination, false));
+    }
     tracing::debug!(
         event = "occurrence.created",
         incident_id = %incident.id,
         "Immutable occurrence created"
     );
-    Ok(destination)
+    Ok((destination, true))
 }
 
 fn incident_group_key(incident: &Incident) -> String {
@@ -411,6 +427,21 @@ mod tests {
             occurrence_count += 1;
         }
         assert_eq!(occurrence_count, 16);
+        fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn duplicate_occurrence_is_idempotent() {
+        let root = std::env::temp_dir().join(format!("rescueloop-store-{}", uuid::Uuid::new_v4()));
+        let directory = root.join("incidents");
+        let occurrence = fixture("api", "oom");
+        save_incident(&directory, &occurrence).await.unwrap();
+        let (_, created) = save_incident(&directory, &occurrence).await.unwrap();
+        assert!(!created);
+
+        let stored = incidents(&directory).await.unwrap();
+        assert_eq!(stored.len(), 1);
+        assert_eq!(stored[0].0.occurrence_count, 1);
         fs::remove_dir_all(root).await.unwrap();
     }
 }
