@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use rescueloop_core::Incident;
-use std::io;
 use std::path::{Path, PathBuf};
 use tokio::fs;
+
+use crate::storage;
 
 pub(crate) async fn incidents(dir: &Path) -> Result<Vec<(Incident, PathBuf)>> {
     let paths = match incident_index(dir).await {
@@ -160,7 +161,7 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
         if existing.evidence.len() > 20 {
             existing.evidence.drain(..existing.evidence.len() - 20);
         }
-        fs::write(&path, serde_json::to_vec_pretty(&existing)?).await?;
+        storage::replace_durable(&path, &serde_json::to_vec_pretty(&existing)?).await?;
         tracing::info!(
             event = "incident.updated",
             incident_id = %existing.id,
@@ -181,22 +182,9 @@ pub(crate) async fn save_incident(dir: &Path, incident: &Incident) -> Result<(Pa
     incident.first_observed_at = Some(incident.observed_at);
     incident.last_observed_at = Some(incident.observed_at);
     let destination = dir.join(format!("{}.json", incident.id));
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-        .await
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
-            return Ok((destination, false));
-        }
-        Err(error) => return Err(error.into()),
-    };
-    use tokio::io::AsyncWriteExt;
-    file.write_all(&serde_json::to_vec_pretty(&incident)?)
-        .await?;
-    file.flush().await?;
+    if !storage::create_durable(&destination, &serde_json::to_vec_pretty(&incident)?).await? {
+        return Ok((destination, false));
+    }
     tracing::info!(
         event = "incident.created",
         incident_id = %incident.id,
@@ -249,20 +237,7 @@ async fn save_occurrence(incident_dir: &Path, incident: &Incident) -> Result<Pat
     let directory = state_root.join("occurrences");
     fs::create_dir_all(&directory).await?;
     let destination = directory.join(format!("{}.json", incident.id));
-    let mut file = match fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&destination)
-        .await
-    {
-        Ok(file) => file,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(destination),
-        Err(error) => return Err(error.into()),
-    };
-    use tokio::io::AsyncWriteExt;
-    file.write_all(&serde_json::to_vec_pretty(incident)?)
-        .await?;
-    file.flush().await?;
+    let _ = storage::create_durable(&destination, &serde_json::to_vec_pretty(incident)?).await?;
     tracing::debug!(
         event = "occurrence.created",
         incident_id = %incident.id,

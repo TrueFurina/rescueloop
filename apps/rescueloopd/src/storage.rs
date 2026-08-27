@@ -1,5 +1,9 @@
 use anyhow::{Context, Result, bail};
-use std::path::{Path, PathBuf};
+use std::{
+    fs::{self, File, OpenOptions},
+    io::{self, Write},
+    path::{Path, PathBuf},
+};
 
 pub fn prepare_state_store(incident_dir: &Path) -> Result<PathBuf> {
     let root = state_root(incident_dir);
@@ -53,6 +57,105 @@ fn state_root(incident_dir: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or(incident_dir)
         .to_path_buf()
+}
+
+/// Publishes a fully synced file without replacing an existing destination.
+pub async fn create_durable(path: &Path, bytes: &[u8]) -> Result<bool> {
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || create_durable_sync(&path, &bytes)).await?
+}
+
+/// Replaces a projection atomically after its complete contents reach disk.
+pub async fn replace_durable(path: &Path, bytes: &[u8]) -> Result<()> {
+    let path = path.to_path_buf();
+    let bytes = bytes.to_vec();
+    tokio::task::spawn_blocking(move || replace_durable_sync(&path, &bytes)).await?
+}
+
+fn write_temporary(path: &Path, bytes: &[u8]) -> Result<(PathBuf, File)> {
+    let parent = path.parent().context("durable file path has no parent")?;
+    fs::create_dir_all(parent)?;
+    let temporary = parent.join(format!(".rescueloop-write-{}.tmp", uuid::Uuid::new_v4()));
+    let mut file = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    file.write_all(bytes)?;
+    file.sync_all()?;
+    Ok((temporary, file))
+}
+
+fn create_durable_sync(path: &Path, bytes: &[u8]) -> Result<bool> {
+    let (temporary, file) = write_temporary(path, bytes)?;
+    drop(file);
+    let published = match fs::hard_link(&temporary, path) {
+        Ok(()) => true,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => false,
+        Err(error) => {
+            let _ = fs::remove_file(&temporary);
+            return Err(error.into());
+        }
+    };
+    fs::remove_file(&temporary)?;
+    sync_parent(path)?;
+    Ok(published)
+}
+
+fn replace_durable_sync(path: &Path, bytes: &[u8]) -> Result<()> {
+    let (temporary, file) = write_temporary(path, bytes)?;
+    drop(file);
+    if let Err(error) = replace_file(&temporary, path) {
+        let _ = fs::remove_file(&temporary);
+        return Err(error.into());
+    }
+    sync_parent(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(Some(0))
+        .collect::<Vec<_>>();
+    if unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    } == 0
+    {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn sync_parent(path: &Path) -> io::Result<()> {
+    File::open(path.parent().unwrap_or(Path::new(".")))?.sync_all()
+}
+
+#[cfg(not(unix))]
+fn sync_parent(_path: &Path) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -129,6 +232,25 @@ fn secure_directory(path: &Path, may_replace_permissions: bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn durable_create_never_overwrites_and_replace_is_complete() {
+        let base =
+            std::env::temp_dir().join(format!("rescueloop-durable-{}", uuid::Uuid::new_v4()));
+        let path = base.join("incident.json");
+        assert!(create_durable(&path, b"first").await.unwrap());
+        assert!(!create_durable(&path, b"second").await.unwrap());
+        assert_eq!(fs::read(&path).unwrap(), b"first");
+        replace_durable(&path, b"replacement").await.unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"replacement");
+        assert!(
+            !fs::read_dir(&base)
+                .unwrap()
+                .flatten()
+                .any(|entry| entry.file_name().to_string_lossy().ends_with(".tmp"))
+        );
+        fs::remove_dir_all(base).unwrap();
+    }
 
     #[cfg(unix)]
     #[test]

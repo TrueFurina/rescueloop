@@ -32,6 +32,9 @@ tracing-subscriber.workspace = true
 uuid.workspace = true
 libc.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_FileSystem"] }
+
 [dev-dependencies]
 bytes = "1"
 rmcp = { workspace = true, features = ["client"] }

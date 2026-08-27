@@ -11,6 +11,9 @@ must not rewrite all documents during an ordinary update.
 Every normalized event is first persisted as an immutable occurrence using `create_new`. The grouped
 incident document is a compact UI projection that may advance its occurrence count and last-seen time;
 the original evidence remains recoverable from occurrence documents.
+Both paths use a same-directory synced temporary file. Immutable occurrences are published with an
+atomic no-clobber link; grouped projections use an atomic replace and directory sync on Unix. Windows
+replacement uses `MoveFileExW` with replace and write-through flags.
 
 ## Disposable index
 
