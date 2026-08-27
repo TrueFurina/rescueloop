@@ -27,6 +27,8 @@ replacement uses `MoveFileExW` with replace and write-through flags.
 Incident projections and pending observation-journal records are capped at 4 MiB when read. Both
 normal readers and disposable-index rebuilds stream only up to the limit plus one byte, preventing a
 corrupt or replaced state document from causing an unbounded allocation.
+The journal accepts at most 16 pending files during recovery. Normal serialized ingestion can leave
+only one; exceeding the guard fails closed instead of materializing attacker-controlled state.
 Grouping, projection replacement, index update and initial lineage append are serialized by a
 cross-process incident-store lock. Concurrent collectors therefore cannot lose occurrence-count or
 evidence updates.

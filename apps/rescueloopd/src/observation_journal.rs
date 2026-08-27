@@ -7,6 +7,7 @@ use tokio::io::AsyncReadExt;
 use crate::storage;
 
 const MAX_JOURNAL_DOCUMENT_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_PENDING_TRANSACTIONS: usize = 16;
 
 #[derive(Serialize, Deserialize)]
 struct PendingObservation {
@@ -40,6 +41,12 @@ pub async fn pending(incident_dir: &Path) -> Result<Vec<Pending>> {
     while let Some(entry) = entries.next_entry().await? {
         if entry.path().extension().and_then(|value| value.to_str()) == Some("json") {
             paths.push(entry.path());
+            if paths.len() > MAX_PENDING_TRANSACTIONS {
+                anyhow::bail!(
+                    "observation journal contains more than {} pending transactions",
+                    MAX_PENDING_TRANSACTIONS
+                )
+            }
         }
     }
     paths.sort();
@@ -92,6 +99,22 @@ mod tests {
         tokio::fs::create_dir_all(&directory).await.unwrap();
         let file = std::fs::File::create(directory.join("oversized.json")).unwrap();
         file.set_len(MAX_JOURNAL_DOCUMENT_BYTES + 1).unwrap();
+        assert!(pending(&incidents).await.is_err());
+        tokio::fs::remove_dir_all(root).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn rejects_unbounded_pending_transaction_count() {
+        let root =
+            std::env::temp_dir().join(format!("rescueloop-journal-{}", uuid::Uuid::new_v4()));
+        let incidents = root.join("incidents");
+        let directory = journal_directory(&incidents);
+        tokio::fs::create_dir_all(&directory).await.unwrap();
+        for index in 0..=MAX_PENDING_TRANSACTIONS {
+            tokio::fs::write(directory.join(format!("{index}.json")), b"{}")
+                .await
+                .unwrap();
+        }
         assert!(pending(&incidents).await.is_err());
         tokio::fs::remove_dir_all(root).await.unwrap();
     }
