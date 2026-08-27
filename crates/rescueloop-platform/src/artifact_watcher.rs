@@ -204,7 +204,9 @@ fn build_incident(name: &'static str, platform: &'static str, path: PathBuf) -> 
 fn read_report(path: &Path) -> Result<(Vec<u8>, String, u64)> {
     let file =
         File::open(path).with_context(|| format!("cannot open report: {}", path.display()))?;
-    let size_bytes = file.metadata().map(|value| value.len()).unwrap_or_default();
+    let initial = file.metadata()?;
+    let size_bytes = initial.len();
+    let initial_modified = initial.modified().ok();
     let mut reader = BufReader::new(file);
     let mut diagnostic_bytes = Vec::with_capacity(
         usize::try_from(size_bytes)
@@ -213,14 +215,23 @@ fn read_report(path: &Path) -> Result<(Vec<u8>, String, u64)> {
     );
     let mut digest = Sha256::new();
     let mut chunk = [0_u8; 64 * 1024];
+    let mut bytes_read = 0_u64;
     loop {
         let read = reader.read(&mut chunk)?;
         if read == 0 {
             break;
         }
+        bytes_read = bytes_read.saturating_add(read as u64);
         digest.update(&chunk[..read]);
         let remaining = MAX_DIAGNOSTIC_BYTES.saturating_sub(diagnostic_bytes.len());
         diagnostic_bytes.extend_from_slice(&chunk[..read.min(remaining)]);
+    }
+    let final_metadata = reader.get_ref().metadata()?;
+    if bytes_read != size_bytes
+        || final_metadata.len() != size_bytes
+        || final_metadata.modified().ok() != initial_modified
+    {
+        anyhow::bail!("diagnostic artifact changed while it was being read")
     }
     Ok((
         diagnostic_bytes,
@@ -293,8 +304,7 @@ impl IncidentCollector for ArtifactWatcher {
             if first_size == 0 || first_size != second_size {
                 continue;
             }
-            self.remember(path.clone());
-            let incident = match self.to_incident(path).await {
+            let incident = match self.to_incident(path.clone()).await {
                 Ok(incident) => incident,
                 Err(error) => {
                     tracing::warn!(
@@ -306,6 +316,7 @@ impl IncidentCollector for ArtifactWatcher {
                     continue;
                 }
             };
+            self.remember(path);
             if is_rescueloop(incident.application.as_deref()) {
                 continue;
             }
