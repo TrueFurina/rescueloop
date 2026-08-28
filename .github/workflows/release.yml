@@ -84,7 +84,7 @@ jobs:
         run: |
           Copy-Item "target\${{ matrix.target }}\release\rescueloop.exe" .
           Compress-Archive rescueloop.exe "${{ matrix.asset }}.zip"
-          dotnet tool install --global wix
+          dotnet tool install --global wix --version 5.0.2
           wix build packaging/windows/Product.wxs -d "Version=$($env:RELEASE_VERSION.TrimStart('v'))" -d "BinaryPath=$pwd\rescueloop.exe" -o "${{ matrix.asset }}.msi"
       - uses: actions/upload-artifact@v4
         with:
