@@ -35,19 +35,15 @@ Everything stays on your machine unless you explicitly ask an AI agent for help.
 
 ## Try it
 
-Clone the repository and open the console:
+Clone the repository and start RescueLoop:
 
 ```sh
 git clone https://github.com/ostapondo/rescueloop.git
 cd rescueloop
-cargo run -p rescueloop -- console
+cargo run -p rescueloop
 ```
 
-Run the first-time setup when you want to connect an AI agent and choose event sources:
-
-```sh
-cargo run -p rescueloop -- setup
-```
+The first run detects supported AI agents and walks you through setup automatically.
 
 Install the background watcher when you want RescueLoop to start automatically:
 
