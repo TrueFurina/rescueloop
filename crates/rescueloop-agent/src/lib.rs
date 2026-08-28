@@ -50,14 +50,38 @@ pub fn detect_cli_agents() -> Vec<AgentConfig> {
 
 fn find_executable(name: &str) -> Option<PathBuf> {
     std::env::var_os("PATH").and_then(|paths| {
-        std::env::split_paths(&paths)
-            .map(|dir| dir.join(name))
-            .find(|candidate| candidate.is_file())
+        let directories = std::env::split_paths(&paths).collect::<Vec<_>>();
+        find_in_directories(name, &directories)
     })
 }
 
+fn find_in_directories(name: &str, directories: &[PathBuf]) -> Option<PathBuf> {
+    let mut names = vec![name.to_string()];
+    if cfg!(windows) && PathBuf::from(name).extension().is_none() {
+        let extensions = std::env::var_os("PATHEXT")
+            .map(|value| {
+                value
+                    .to_string_lossy()
+                    .split(';')
+                    .filter(|extension| !extension.is_empty())
+                    .map(|extension| extension.to_ascii_lowercase())
+                    .collect::<Vec<_>>()
+            })
+            .filter(|extensions| !extensions.is_empty())
+            .unwrap_or_else(|| vec![".exe".into(), ".cmd".into(), ".bat".into()]);
+        names.extend(
+            extensions
+                .into_iter()
+                .map(|extension| format!("{name}{extension}")),
+        );
+    }
+    directories
+        .iter()
+        .flat_map(|directory| names.iter().map(move |name| directory.join(name)))
+        .find(|candidate| candidate.is_file())
+}
+
 fn find_bundled_codex() -> Option<PathBuf> {
-    let home = PathBuf::from(std::env::var_os("HOME")?);
     let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
         ("macos", "aarch64") => "macos-aarch64",
         ("macos", "x86_64") => "macos-x86_64",
@@ -66,33 +90,55 @@ fn find_bundled_codex() -> Option<PathBuf> {
         _ => return None,
     };
     let binary = if cfg!(windows) { "codex.exe" } else { "codex" };
-    let extension_roots = [
-        home.join(".vscode/extensions"),
-        home.join(".vscode-insiders/extensions"),
-        home.join(".cursor/extensions"),
-    ];
     let mut candidates = Vec::new();
-    for root in extension_roots {
-        let Ok(entries) = std::fs::read_dir(root) else {
-            continue;
-        };
-        for entry in entries.flatten() {
-            if !entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("openai.chatgpt-")
-            {
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        let extension_roots = [
+            home.join(".vscode/extensions"),
+            home.join(".vscode-insiders/extensions"),
+            home.join(".cursor/extensions"),
+        ];
+        for root in extension_roots {
+            let Ok(entries) = std::fs::read_dir(root) else {
                 continue;
+            };
+            for entry in entries.flatten() {
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("openai.chatgpt-")
+                {
+                    continue;
+                }
+                add_candidate(
+                    &mut candidates,
+                    entry.path().join("bin").join(platform).join(binary),
+                );
             }
-            let candidate = entry.path().join("bin").join(platform).join(binary);
-            if candidate.is_file() {
-                let modified = candidate.metadata().and_then(|value| value.modified()).ok();
-                candidates.push((modified, candidate));
+        }
+    }
+    if cfg!(windows)
+        && let Some(local_app_data) = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)
+    {
+        let root = local_app_data.join("OpenAI/Codex/bin");
+        add_candidate(&mut candidates, root.join(binary));
+        if let Ok(entries) = std::fs::read_dir(root) {
+            for entry in entries.flatten() {
+                add_candidate(&mut candidates, entry.path().join(binary));
             }
         }
     }
     candidates.sort_by_key(|item| item.0);
     candidates.pop().map(|item| item.1)
+}
+
+fn add_candidate(
+    candidates: &mut Vec<(Option<std::time::SystemTime>, PathBuf)>,
+    candidate: PathBuf,
+) {
+    if candidate.is_file() {
+        let modified = candidate.metadata().and_then(|value| value.modified()).ok();
+        candidates.push((modified, candidate));
+    }
 }
 
 pub struct CliAnalysisProvider {

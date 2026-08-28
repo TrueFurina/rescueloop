@@ -1,3 +1,4 @@
+use crate::console::save_agent_config;
 use crate::{
     analyze_with_provider, configured_provider, dismiss_incident, incidents,
     record_incident_status, repair_silent,
@@ -8,7 +9,14 @@ use crossterm::{
     execute,
     terminal::{EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode},
 };
-use ratatui::{Terminal, backend::CrosstermBackend};
+use ratatui::{
+    Terminal,
+    backend::CrosstermBackend,
+    layout::{Constraint, Direction, Layout},
+    style::{Color, Modifier, Style},
+    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Wrap},
+};
+use rescueloop_agent::AgentConfig;
 use rescueloop_core::{AnalysisResponse, Incident, IncidentStatus};
 use std::{
     io,
@@ -48,6 +56,7 @@ struct App {
 
 pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) -> Result<()> {
     let provider = configured_provider(&dir, endpoint.clone(), token.clone()).await?;
+    let needs_agent_onboarding = provider.is_none() && endpoint.is_none();
     let agent_name = provider
         .as_ref()
         .map(|value| value.name().to_string())
@@ -82,6 +91,12 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
     terminal.clear()?;
 
     let outcome = async {
+        if needs_agent_onboarding {
+            let Some(selected) = select_agent(&mut terminal, &dir).await? else {
+                return Ok(());
+            };
+            app.agent_name = format!("{:?}", selected.agent);
+        }
         let mut last_refresh = Instant::now();
         loop {
             terminal.draw(|frame| draw(frame, &app))?;
@@ -382,6 +397,114 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     terminal.show_cursor()?;
     outcome
+}
+
+async fn select_agent(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    dir: &std::path::Path,
+) -> Result<Option<AgentConfig>> {
+    let agents = rescueloop_agent::detect_cli_agents();
+    let mut selected = 0_usize;
+    loop {
+        terminal.draw(|frame| {
+            let area = frame.area();
+            let sections = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(5),
+                    Constraint::Min(3),
+                    Constraint::Length(3),
+                ])
+                .split(area);
+            frame.render_widget(
+                Paragraph::new(
+                    "Welcome to RescueLoop\nChoose the local AI agent used for diagnosis. Repairs remain deterministic and require explicit approval.",
+                )
+                .block(Block::default().borders(Borders::ALL).title(" First run "))
+                .wrap(Wrap { trim: true }),
+                sections[0],
+            );
+            if agents.is_empty() {
+                frame.render_widget(
+                    Paragraph::new(
+                        "No supported OpenAI Codex or Claude CLI was detected. Install one and restart RescueLoop, or press Esc to close.",
+                    )
+                    .block(Block::default().borders(Borders::ALL).title(" AI agents "))
+                    .wrap(Wrap { trim: true }),
+                    sections[1],
+                );
+            } else {
+                let items = agents
+                    .iter()
+                    .enumerate()
+                    .map(|(index, agent)| {
+                        ListItem::new(format!(
+                            "[{}] {:?} — {}",
+                            index + 1,
+                            agent.agent,
+                            agent.executable.display()
+                        ))
+                    })
+                    .collect::<Vec<_>>();
+                let mut state = ListState::default().with_selected(Some(selected));
+                frame.render_stateful_widget(
+                    List::new(items)
+                        .block(Block::default().borders(Borders::ALL).title(" AI agents "))
+                        .highlight_style(
+                            Style::default()
+                                .fg(Color::Black)
+                                .bg(Color::Cyan)
+                                .add_modifier(Modifier::BOLD),
+                        )
+                        .highlight_symbol("▶ "),
+                    sections[1],
+                    &mut state,
+                );
+            }
+            frame.render_widget(
+                Paragraph::new(if agents.is_empty() {
+                    "Esc or q: close RescueLoop"
+                } else {
+                    "↑/↓ or j/k: select    Enter: confirm    Esc or q: close RescueLoop"
+                })
+                .block(Block::default().borders(Borders::ALL)),
+                sections[2],
+            );
+        })?;
+
+        if !event::poll(Duration::from_millis(100))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+        match normalize_key_code(key.code) {
+            KeyCode::Esc | KeyCode::Char('q') => return Ok(None),
+            KeyCode::Up | KeyCode::Char('k') if !agents.is_empty() => {
+                selected = selected.saturating_sub(1);
+            }
+            KeyCode::Down | KeyCode::Char('j') if !agents.is_empty() => {
+                selected = (selected + 1).min(agents.len() - 1);
+            }
+            KeyCode::Char(value) if value.is_ascii_digit() && value != '0' => {
+                let index = value.to_digit(10).unwrap_or_default() as usize - 1;
+                if let Some(agent) = agents.get(index) {
+                    save_agent_config(dir, agent).await?;
+                    return Ok(Some(agent.clone()));
+                }
+            }
+            KeyCode::Enter => {
+                if let Some(agent) = agents.get(selected) {
+                    save_agent_config(dir, agent).await?;
+                    return Ok(Some(agent.clone()));
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 async fn load_saved_analysis(

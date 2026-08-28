@@ -219,58 +219,8 @@ async fn incident_menu(
 }
 
 pub(crate) async fn setup(incident_dir: &Path) -> Result<()> {
-    let detected = rescueloop_agent::detect_cli_agents();
     println!("RescueLoop setup\n");
-    if detected.is_empty() {
-        println!("No supported local AI agents found in PATH.");
-        println!("You can still use an HTTP adapter with --endpoint <URL>.");
-    } else {
-        println!("Detected AI agents:");
-        for (index, agent) in detected.iter().enumerate() {
-            println!(
-                "[{}] {:?} — {}",
-                index + 1,
-                agent.agent,
-                agent.executable.display()
-            );
-        }
-        let config = loop {
-            print!(
-                "Select exactly one agent [1-{}], or q to skip AI setup: ",
-                detected.len()
-            );
-            io::stdout().flush()?;
-            let mut answer = String::new();
-            io::stdin().read_line(&mut answer)?;
-            let answer = answer.trim();
-            if answer.eq_ignore_ascii_case("q") {
-                println!("AI setup skipped; detection setup will continue.");
-                break None;
-            }
-            let Ok(selected) = answer.parse::<usize>() else {
-                println!("A numeric selection is required; Enter alone does not select a default.");
-                continue;
-            };
-            let Some(config) = selected
-                .checked_sub(1)
-                .and_then(|index| detected.get(index))
-            else {
-                println!("Selection is out of range.");
-                continue;
-            };
-            break Some(config);
-        };
-        if let Some(config) = config {
-            let path = config_path(incident_dir);
-            if let Some(parent) = path.parent() {
-                fs::create_dir_all(parent).await?;
-            }
-            fs::write(&path, serde_json::to_vec_pretty(config)?).await?;
-            println!("Selected: {:?}", config.agent);
-            println!("Configuration saved to {}", path.display());
-            println!("The agent runs read-only; Repair IR is validated before approval.");
-        }
-    }
+    setup_agent(incident_dir).await?;
 
     let mut settings = load_settings(incident_dir).await?;
     println!("\nEvent sources:");
@@ -308,6 +258,71 @@ pub(crate) async fn setup(incident_dir: &Path) -> Result<()> {
     }
     println!("\nSetup complete. Run `rescueloop` to open the console.");
     Ok(())
+}
+
+pub(crate) async fn setup_agent(incident_dir: &Path) -> Result<bool> {
+    let detected = rescueloop_agent::detect_cli_agents();
+    if detected.is_empty() {
+        println!("No supported local AI agents found in PATH.");
+        println!("You can still use an HTTP adapter with --endpoint <URL>.");
+        return Ok(false);
+    } else {
+        println!("Detected AI agents:");
+        for (index, agent) in detected.iter().enumerate() {
+            println!(
+                "[{}] {:?} — {}",
+                index + 1,
+                agent.agent,
+                agent.executable.display()
+            );
+        }
+        let config = loop {
+            print!(
+                "Select exactly one agent [1-{}], or q to skip AI setup: ",
+                detected.len()
+            );
+            io::stdout().flush()?;
+            let mut answer = String::new();
+            io::stdin().read_line(&mut answer)?;
+            let answer = answer.trim();
+            if answer.eq_ignore_ascii_case("q") {
+                println!("AI setup skipped; detection setup will continue.");
+                break None;
+            }
+            let Ok(selected) = answer.parse::<usize>() else {
+                println!("A numeric selection is required; Enter alone does not select a default.");
+                continue;
+            };
+            let Some(config) = selected
+                .checked_sub(1)
+                .and_then(|index| detected.get(index))
+            else {
+                println!("Selection is out of range.");
+                continue;
+            };
+            break Some(config);
+        };
+        if let Some(config) = config {
+            let path = save_agent_config(incident_dir, config).await?;
+            println!("Selected: {:?}", config.agent);
+            println!("Configuration saved to {}", path.display());
+            println!("The agent runs read-only; Repair IR is validated before approval.");
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+pub(crate) async fn save_agent_config(
+    incident_dir: &Path,
+    config: &AgentConfig,
+) -> Result<PathBuf> {
+    let path = config_path(incident_dir);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).await?;
+    }
+    fs::write(&path, serde_json::to_vec_pretty(config)?).await?;
+    Ok(path)
 }
 
 fn settings_path(incident_dir: &Path) -> PathBuf {
