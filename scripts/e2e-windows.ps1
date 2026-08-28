@@ -1,8 +1,11 @@
 $ErrorActionPreference = "Stop"
 $Root = Join-Path ([System.IO.Path]::GetTempPath()) ("rescueloop-e2e-" + [guid]::NewGuid())
+$PreviousRustLog = $env:RUST_LOG
+$env:RUST_LOG = "info"
 try {
     New-Item -ItemType Directory -Force -Path $Root | Out-Null
-    $Incidents = Join-Path $Root "incidents"
+    $State = Join-Path $Root ".rescueloop"
+    $Incidents = Join-Path $State "incidents"
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents run cmd.exe /c exit 42
     if ($LASTEXITCODE -ne 0) { throw "supervised run command failed" }
     $Files = @(Get-ChildItem $Incidents -Filter *.json)
@@ -13,7 +16,7 @@ try {
     if ($LASTEXITCODE -ne 0) { throw "sources command failed" }
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents replay (Join-Path $Root "missing.json") 2>$null
     if ($LASTEXITCODE -eq 0) { throw "expected replay failure" }
-    $LogFiles = @(Get-ChildItem (Join-Path $Root "logs") -Filter "rescueloop-*.jsonl")
+    $LogFiles = @(Get-ChildItem (Join-Path $State "logs") -Filter "rescueloop-*.jsonl")
     if ($LogFiles.Count -lt 1) { throw "expected operational log file" }
     $LogRecords = @(Get-Content $LogFiles[-1].FullName | ForEach-Object { $_ | ConvertFrom-Json })
     if (-not ($LogRecords | Where-Object { $_.fields.event -eq "runtime.failed" })) {
@@ -43,11 +46,11 @@ try {
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents run cmd.exe /c exit 43 2>$null
     Remove-Item Env:RESCUELOOP_TEST_ABORT_AFTER_OCCURRENCE
     if ($LASTEXITCODE -eq 0) { throw "expected observation failpoint abort" }
-    $Pending = @(Get-ChildItem (Join-Path $Root "observation-journal") -Filter *.json)
+    $Pending = @(Get-ChildItem (Join-Path $State "observation-journal") -Filter *.json)
     if ($Pending.Count -ne 1) { throw "expected one pending observation transaction" }
     & cargo run --quiet -p rescueloop -- --incident-dir $Incidents run cmd.exe /c exit 43
     if ($LASTEXITCODE -ne 0) { throw "observation recovery command failed" }
-    $Pending = @(Get-ChildItem (Join-Path $Root "observation-journal") -Filter *.json)
+    $Pending = @(Get-ChildItem (Join-Path $State "observation-journal") -Filter *.json)
     if ($Pending.Count -ne 0) { throw "observation journal was not drained" }
     $Recovered = @(Get-ChildItem $Incidents -Filter *.json | ForEach-Object {
         Get-Content $_.FullName -Raw | ConvertFrom-Json
@@ -62,5 +65,10 @@ try {
     Write-Host "Windows native E2E passed."
 }
 finally {
+    if ($null -eq $PreviousRustLog) {
+        Remove-Item Env:RUST_LOG -ErrorAction SilentlyContinue
+    } else {
+        $env:RUST_LOG = $PreviousRustLog
+    }
     if (Test-Path $Root) { Remove-Item -Recurse -Force $Root }
 }

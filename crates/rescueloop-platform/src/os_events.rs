@@ -40,7 +40,7 @@ pub fn available_sources() -> Vec<Box<dyn IncidentCollector>> {
 mod macos {
     use anyhow::{Context, Result, bail};
     use async_trait::async_trait;
-    use rescueloop_core::{Confidence, Evidence, Incident, IncidentCollector, IncidentKind};
+    use rescueloop_core::{Confidence, Evidence, Incident, IncidentCollector};
     use serde_json::Value;
     use std::{collections::BTreeMap, process::Stdio};
     use tokio::{
@@ -208,7 +208,7 @@ mod macos {
 mod windows {
     use anyhow::{Context, Result, bail};
     use async_trait::async_trait;
-    use rescueloop_core::{Confidence, Evidence, Incident, IncidentCollector, IncidentKind};
+    use rescueloop_core::{Confidence, Evidence, Incident, IncidentCollector};
     use serde::Deserialize;
     use serde_json::Value;
     use std::{collections::BTreeMap, process::Stdio};

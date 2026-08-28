@@ -72,7 +72,7 @@ impl RollingWriter {
             .read(true)
             .write(true)
             .open(config.directory.join(".rescueloop-log-maintenance"))?;
-        maintenance_lock.lock_exclusive()?;
+        lock_exclusive_wait(&maintenance_lock)?;
         maintain_inactive(&config.directory, config.retention_days)?;
         FileExt::unlock(&maintenance_lock)?;
         let lock_path = run_lock_path(&config.directory, &config.run_id);
@@ -243,6 +243,22 @@ fn open(path: &Path) -> io::Result<File> {
     OpenOptions::new().create(true).append(true).open(path)
 }
 
+fn lock_exclusive_wait(file: &File) -> io::Result<()> {
+    const RETRY_DELAY: Duration = Duration::from_millis(10);
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => return Ok(()),
+            Err(error) if lock_is_contended(&error) => std::thread::sleep(RETRY_DELAY),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn lock_is_contended(error: &io::Error) -> bool {
+    error.kind() == io::ErrorKind::WouldBlock
+        || cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33))
+}
+
 fn log_path(directory: &Path, run_id: &str, date: NaiveDate, sequence: u32) -> PathBuf {
     directory.join(format!(
         "{LOG_PREFIX}{}-{run_id}-{sequence:04}.jsonl",
@@ -296,7 +312,7 @@ fn remove_inactive_locks(directory: &Path) -> Result<()> {
                     });
                 }
             }
-            Err(error) if error.kind() == io::ErrorKind::WouldBlock => {}
+            Err(error) if lock_is_contended(&error) => {}
             Err(error) => return Err(error.into()),
         }
     }
@@ -321,7 +337,7 @@ fn is_active(path: &Path) -> Result<bool> {
             FileExt::unlock(&lock)?;
             Ok(false)
         }
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) if lock_is_contended(&error) => Ok(true),
         Err(error) => Err(error.into()),
     }
 }

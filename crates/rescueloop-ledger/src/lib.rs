@@ -7,7 +7,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
-    io::{BufReader, Read, Write},
+    io::{BufReader, Read, Seek, SeekFrom, Write},
     path::Path,
 };
 use uuid::Uuid;
@@ -138,8 +138,9 @@ fn append_locked(
     let existed = path.exists();
     let mut file = OpenOptions::new()
         .create(true)
+        .truncate(false)
         .read(true)
-        .append(true)
+        .write(true)
         .open(path)?;
     file.lock_exclusive()?;
     let prior = read_entries_for_append(&file, path)?;
@@ -179,6 +180,7 @@ fn append_locked(
     entry.entry_hash = calculate_hash(&entry)?;
     let mut encoded = serde_json::to_vec(&entry)?;
     encoded.push(b'\n');
+    file.seek(SeekFrom::End(0))?;
     file.write_all(&encoded)?;
     file.sync_data()?;
     FileExt::unlock(&file)?;

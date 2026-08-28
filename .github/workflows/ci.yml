@@ -18,7 +18,6 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: actions/setup-node@v4
-        if: runner.os != 'Windows'
         with:
           node-version: 24
       - run: cargo fmt --check
@@ -33,6 +32,10 @@ jobs:
       - name: MCP protocol compatibility
         if: runner.os != 'Windows'
         run: ./scripts/validate-mcp.sh
+      - name: Windows MCP protocol compatibility
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/validate-mcp.ps1
       - name: Windows native E2E
         if: runner.os == 'Windows'
         shell: pwsh

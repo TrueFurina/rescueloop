@@ -2,6 +2,7 @@ use anyhow::{Context, Result, bail};
 use std::path::{Path, PathBuf};
 use tokio::{fs, process::Command};
 
+#[cfg(target_os = "macos")]
 const LABEL: &str = "dev.rescueloop.agent";
 
 pub async fn install(incident_dir: &Path) -> Result<()> {

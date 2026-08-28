@@ -225,7 +225,7 @@ fn secure_directory(path: &Path, may_replace_permissions: bool) -> Result<()> {
         .filter(|value| value.starts_with("S-1-"))
         .context("cannot parse the current Windows security identifier")?;
     let principal = format!("*{sid}:(OI)(CI)F");
-    let status = Command::new("icacls")
+    let output = Command::new("icacls")
         .arg(path)
         .args([
             "/inheritance:r",
@@ -234,10 +234,13 @@ fn secure_directory(path: &Path, may_replace_permissions: bool) -> Result<()> {
             "*S-1-5-18:(OI)(CI)F",
             "*S-1-5-32-544:(OI)(CI)F",
         ])
-        .status()
+        .output()
         .context("cannot apply a private Windows ACL to RescueLoop state")?;
-    if !status.success() {
-        bail!("Windows refused the private RescueLoop state ACL")
+    if !output.status.success() {
+        bail!(
+            "Windows refused the private RescueLoop state ACL: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )
     }
     Ok(())
 }
@@ -313,14 +316,20 @@ mod tests {
                 "-NoProfile",
                 "-NonInteractive",
                 "-Command",
-                "$acl=Get-Acl -LiteralPath $env:RESCUELOOP_TEST_ACL; $acl.AreAccessRulesProtected; $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }",
+                "$acl=Get-Acl -LiteralPath $env:RESCUELOOP_TEST_ACL; if(-not $acl.AreAccessRulesProtected){ throw 'ACL inheritance is enabled' }; $acl.Access | ForEach-Object { $_.IdentityReference.Translate([System.Security.Principal.SecurityIdentifier]).Value }",
             ])
             .env("RESCUELOOP_TEST_ACL", base.join(".rescueloop"))
+            // PowerShell 7 exports a module path that can prevent Windows PowerShell 5.1
+            // from autoloading its inbox security module.
+            .env_remove("PSModulePath")
             .output()
             .unwrap();
-        assert!(output.status.success());
+        assert!(
+            output.status.success(),
+            "PowerShell ACL verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
         let acl = String::from_utf8_lossy(&output.stdout);
-        assert!(acl.lines().next().is_some_and(|line| line.trim() == "True"));
         assert!(acl.contains("S-1-5-18"));
         assert!(acl.contains("S-1-5-32-544"));
         let whoami = Command::new("whoami")

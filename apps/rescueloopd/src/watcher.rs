@@ -270,6 +270,31 @@ async fn shutdown_signal() -> Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "windows")]
+async fn shutdown_signal() -> Result<()> {
+    use tokio::signal::windows;
+
+    let mut ctrl_c = windows::ctrl_c()?;
+    let mut ctrl_break = windows::ctrl_break()?;
+    let mut close = windows::ctrl_close()?;
+    let mut logoff = windows::ctrl_logoff()?;
+    let mut shutdown = windows::ctrl_shutdown()?;
+    tokio::select! {
+        _ = ctrl_c.recv() => {},
+        _ = ctrl_break.recv() => {},
+        _ = close.recv() => {},
+        _ = logoff.recv() => {},
+        _ = shutdown.recv() => {},
+    }
+    Ok(())
+}
+
+#[cfg(not(any(unix, target_os = "windows")))]
+async fn shutdown_signal() -> Result<()> {
+    tokio::signal::ctrl_c().await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -357,29 +382,4 @@ mod tests {
             .unwrap();
         assert_eq!(health.snapshot().active_sources, 0);
     }
-}
-
-#[cfg(target_os = "windows")]
-async fn shutdown_signal() -> Result<()> {
-    use tokio::signal::windows;
-
-    let mut ctrl_c = windows::ctrl_c()?;
-    let mut ctrl_break = windows::ctrl_break()?;
-    let mut close = windows::ctrl_close()?;
-    let mut logoff = windows::ctrl_logoff()?;
-    let mut shutdown = windows::ctrl_shutdown()?;
-    tokio::select! {
-        _ = ctrl_c.recv() => {},
-        _ = ctrl_break.recv() => {},
-        _ = close.recv() => {},
-        _ = logoff.recv() => {},
-        _ = shutdown.recv() => {},
-    }
-    Ok(())
-}
-
-#[cfg(not(any(unix, target_os = "windows")))]
-async fn shutdown_signal() -> Result<()> {
-    tokio::signal::ctrl_c().await?;
-    Ok(())
 }
