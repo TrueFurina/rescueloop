@@ -39,16 +39,17 @@ Platform-specific and end-to-end checks live in the `scripts/` directory and run
 The same `cargo` commands work on Windows (Rust toolchain via
 [rustup](https://rustup.rs/)). Script-specific equivalents:
 
-| Unix | Windows (PowerShell) |
-| --- | --- |
-| `./scripts/validate-mcp.sh` | `powershell -ExecutionPolicy Bypass -File scripts/validate-mcp.ps1` |
-| `./scripts/e2e-windows.ps1` (Windows-only e2e) | `powershell -ExecutionPolicy Bypass -File scripts/e2e-windows.ps1` |
-| `./scripts/install.sh` | `powershell -ExecutionPolicy Bypass -File scripts/install.ps1` |
-| `./scripts/benchmark-idle.sh` | `powershell -ExecutionPolicy Bypass -File scripts/benchmark-idle-windows.ps1` |
+| Purpose | Unix/macOS | Windows (PowerShell) |
+| --- | --- | --- |
+| MCP validation | `./scripts/validate-mcp.sh` | `powershell -ExecutionPolicy Bypass -File scripts/validate-mcp.ps1` |
+| Native Windows E2E | — | `powershell -ExecutionPolicy Bypass -File scripts/e2e-windows.ps1` |
+| Installation | `./scripts/install.sh` | `powershell -ExecutionPolicy Bypass -File scripts/install.ps1` |
+| Idle benchmark | `./scripts/benchmark-idle.sh` | `powershell -ExecutionPolicy Bypass -File scripts/benchmark-idle-windows.ps1` |
 
-If a check has no Windows script (for example `validate-logging.sh` or
-`validate-observation-recovery.sh`), either run it under WSL or ask in the
-issue which checks the change actually needs — do not guess.
+Some checks, including `validate-logging.sh` and `validate-observation-recovery.sh`, currently have
+no native Windows equivalent and run only on non-Windows CI runners. If your change affects one of
+these areas, mention the missing Windows coverage in the pull request and ask which
+platform-specific checks are required.
 
 ## Pull requests
 
