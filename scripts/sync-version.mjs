@@ -17,7 +17,7 @@ const files = {
 
 function workspaceVersion() {
   const cargo = readFileSync(files.cargo, "utf8");
-  const workspace = cargo.match(/\[workspace\.package\][\s\S]*?\nversion = "([^"]+)"/);
+  const workspace = cargo.match(/\[workspace\.package\][\s\S]*?\r?\nversion = "([^"]+)"/);
   if (!workspace) throw new Error("workspace package version is missing from Cargo.toml");
   return workspace[1];
 }
@@ -48,7 +48,7 @@ if (!checking) {
 
   replaceRequired(
     files.cargo,
-    /(\[workspace\.package\][\s\S]*?\nversion = ")[^"]+("\n)/,
+    /(\[workspace\.package\][\s\S]*?\r?\nversion = ")[^"]+("\r?\n)/,
     `$1${requestedVersion}$2`,
   );
 
@@ -63,7 +63,7 @@ if (!checking) {
   ];
   let lock = readFileSync(files.lock, "utf8");
   for (const name of localPackages) {
-    const pattern = new RegExp(`(name = "${name}"\\nversion = ")[^"]+("\\n)`);
+    const pattern = new RegExp(`(name = "${name}"\\r?\\nversion = ")[^"]+("\\r?\\n)`);
     if (!pattern.test(lock)) throw new Error(`${name} is missing from Cargo.lock`);
     lock = lock.replace(pattern, `$1${requestedVersion}$2`);
   }
@@ -130,7 +130,7 @@ for (const name of [
   "rescueloop-platform",
   "rescueloop-repair",
 ]) {
-  const match = lock.match(new RegExp(`name = "${name}"\\nversion = "([^"]+)"`));
+  const match = lock.match(new RegExp(`name = "${name}"\\r?\\nversion = "([^"]+)"`));
   if (!match) throw new Error(`${name} is missing from Cargo.lock`);
   assertEqual(`${name} in Cargo.lock`, match[1], version);
 }
