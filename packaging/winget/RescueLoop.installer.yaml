@@ -1,5 +1,5 @@
 PackageIdentifier: Ostapondo.RescueLoop
-PackageVersion: 0.1.0
+PackageVersion: 0.0.1
 InstallerType: zip
 NestedInstallerType: portable
 NestedInstallerFiles:
@@ -7,7 +7,7 @@ NestedInstallerFiles:
     PortableCommandAlias: rescueloop
 Installers:
   - Architecture: x64
-    InstallerUrl: https://github.com/ostapondo/rescueloop/releases/download/v0.1.0/rescueloop-windows-x86_64.zip
+    InstallerUrl: https://github.com/ostapondo/rescueloop/releases/download/v0.0.1/rescueloop-windows-x86_64.zip
     InstallerSha256: RELEASE_WORKFLOW_REPLACES_THIS
 ManifestType: installer
 ManifestVersion: 1.9.0

@@ -1,7 +1,7 @@
 class Rescueloop < Formula
   desc "Local-first observability and safe recovery agent"
   homepage "https://github.com/ostapondo/rescueloop"
-  version "0.1.0"
+  version "0.0.1"
   license "MIT"
 
   on_macos do

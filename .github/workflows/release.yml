@@ -7,7 +7,7 @@ on:
     inputs:
       version:
         description: Version used for a non-publishing packaging test
-        default: "0.1.0"
+        default: "0.0.1"
 
 permissions:
   contents: write
@@ -38,6 +38,12 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check release version
+        shell: bash
+        run: node scripts/sync-version.mjs --check "${RELEASE_VERSION#v}"
       - run: cargo build --release --locked --target ${{ matrix.target }} -p rescueloop
       - name: Sign macOS binary
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
