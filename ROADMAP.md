@@ -16,7 +16,10 @@ detection may be automatic, but repair must stay bounded, reviewable, verifiable
 
 ## One local view of the system
 
-- Build a desktop application for incidents, timelines, and system health.
+- Build a desktop application for incidents, timelines, and system health alongside the existing
+  CLI and TUI. The graphical app should not replace scriptable workflows.
+- Add configurable native notifications for new incidents, completed analysis, repairs awaiting
+  approval, verification failures, and rollbacks. Notifications must not expose private evidence.
 - Correlate crashes, logs, resource pressure, and recent changes.
 - Add searchable history across applications and services.
 - Distinguish active failures, regressions, and resolved incidents.
