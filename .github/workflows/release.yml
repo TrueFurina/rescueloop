@@ -17,8 +17,8 @@ jobs:
     strategy:
       matrix:
         include:
-          - { os: macos-14, target: aarch64-apple-darwin, asset: rescueloop-macos-aarch64 }
-          - { os: macos-13, target: x86_64-apple-darwin, asset: rescueloop-macos-x86_64 }
+          - { os: macos-15, target: aarch64-apple-darwin, asset: rescueloop-macos-aarch64 }
+          - { os: macos-15-intel, target: x86_64-apple-darwin, asset: rescueloop-macos-x86_64 }
           - { os: windows-latest, target: x86_64-pc-windows-msvc, asset: rescueloop-windows-x86_64 }
     runs-on: ${{ matrix.os }}
     env:
