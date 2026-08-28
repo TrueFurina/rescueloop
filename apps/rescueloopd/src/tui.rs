@@ -376,10 +376,19 @@ pub async fn run(dir: PathBuf, endpoint: Option<String>, token: Option<String>) 
                     if app
                         .analysis
                         .as_ref()
+                        .is_some_and(|value| !value.proposed_actions.is_empty())
+                        && app.show_repair =>
+                {
+                    app.state = UiState::ConfirmRepair;
+                }
+                (_, KeyCode::Char('r'))
+                    if app
+                        .analysis
+                        .as_ref()
                         .is_some_and(|value| !value.proposed_actions.is_empty()) =>
                 {
                     app.show_repair = true;
-                    app.state = UiState::ConfirmRepair;
+                    app.state = UiState::Ready;
                 }
                 (_, KeyCode::Esc) => {
                     app.show_details = false;

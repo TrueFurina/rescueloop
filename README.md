@@ -15,6 +15,8 @@ Everything stays on your machine unless you explicitly ask an AI agent for help.
 
 > RescueLoop is early software. It already handles real incidents, but coverage is still growing.
 
+![RescueLoop incident console](assets/rescueloop-console.png)
+
 ## How it works
 
 1. **Detect** — notice a crash, failed process, broken service, container problem, or resource issue.
