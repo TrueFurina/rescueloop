@@ -34,6 +34,22 @@ and the absence of mutation tools:
 
 Platform-specific and end-to-end checks live in the `scripts/` directory and run in CI.
 
+### Windows
+
+The same `cargo` commands work on Windows (Rust toolchain via
+[rustup](https://rustup.rs/)). Script-specific equivalents:
+
+| Unix | Windows (PowerShell) |
+| --- | --- |
+| `./scripts/validate-mcp.sh` | `powershell -ExecutionPolicy Bypass -File scripts/validate-mcp.ps1` |
+| `./scripts/e2e-windows.ps1` (Windows-only e2e) | `powershell -ExecutionPolicy Bypass -File scripts/e2e-windows.ps1` |
+| `./scripts/install.sh` | `powershell -ExecutionPolicy Bypass -File scripts/install.ps1` |
+| `./scripts/benchmark-idle.sh` | `powershell -ExecutionPolicy Bypass -File scripts/benchmark-idle-windows.ps1` |
+
+If a check has no Windows script (for example `validate-logging.sh` or
+`validate-observation-recovery.sh`), either run it under WSL or ask in the
+issue which checks the change actually needs — do not guess.
+
 ## Pull requests
 
 Keep a pull request focused on one problem. Explain what changed, why it changed, and how you tested
