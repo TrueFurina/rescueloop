@@ -12,7 +12,7 @@
       "action_type": "quarantine_path",
       "reason": "Temporarily isolate only the failing plugin and retry the exact launch.",
       "parameters": {
-        "target": "/Users/ostapbelei/Desktop/hmmm/RescueLoop/examples/demo-app/plugins/broken.plugin"
+        "target": "/path/to/rescueloop/examples/demo-app/plugins/broken.plugin"
       },
       "reversible": true
     }

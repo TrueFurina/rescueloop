@@ -3,7 +3,7 @@ PackageVersion: 0.1.0
 PackageLocale: en-US
 Publisher: Ostapondo
 PackageName: RescueLoop
-License: Apache-2.0
-ShortDescription: Lightweight local failure detection and AI-assisted repair console
+License: MIT
+ShortDescription: Local-first observability and safe recovery agent
 ManifestType: defaultLocale
 ManifestVersion: 1.9.0

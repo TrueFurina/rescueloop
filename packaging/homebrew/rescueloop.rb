@@ -1,8 +1,8 @@
 class Rescueloop < Formula
-  desc "Lightweight local failure detection and AI-assisted repair console"
+  desc "Local-first observability and safe recovery agent"
   homepage "https://github.com/ostapondo/rescueloop"
   version "0.1.0"
-  license "Apache-2.0"
+  license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
