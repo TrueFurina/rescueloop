@@ -6,7 +6,8 @@ param(
 $ErrorActionPreference = "Stop"
 $MaxCpu = if ($env:RESCUELOOP_MAX_CPU) { [double]$env:RESCUELOOP_MAX_CPU } else { 1.0 }
 $MaxRssMiB = if ($env:RESCUELOOP_MAX_RSS_MIB) { [double]$env:RESCUELOOP_MAX_RSS_MIB } else { 30.0 }
-$State = Join-Path ([System.IO.Path]::GetTempPath()) ("rescueloop-perf-" + [guid]::NewGuid())
+$Sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("rescueloop-perf-" + [guid]::NewGuid())
+$State = Join-Path $Sandbox "RescueLoop"
 $Stdout = Join-Path $State "watch.out"
 $Stderr = Join-Path $State "watch.err"
 $Process = $null
@@ -85,5 +86,5 @@ finally {
         & taskkill.exe /PID $Process.Id /T /F 2>$null | Out-Null
         $Process.WaitForExit()
     }
-    if (Test-Path $State) { Remove-Item -Recurse -Force $State }
+    if (Test-Path $Sandbox) { Remove-Item -Recurse -Force $Sandbox }
 }
