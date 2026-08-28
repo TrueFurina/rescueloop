@@ -37,6 +37,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
       - run: cargo build --release --locked --target ${{ matrix.target }} -p rescueloop
       - name: Sign macOS binary
         if: runner.os == 'macOS' && env.APPLE_CERTIFICATE_P12 != ''
