@@ -35,21 +35,27 @@ Everything stays on your machine unless you explicitly ask an AI agent for help.
 
 ## Try it
 
-Build RescueLoop:
+Clone the repository and open the console:
+
+```sh
+git clone https://github.com/ostapondo/rescueloop.git
+cd rescueloop
+cargo run -p rescueloop -- console
+```
+
+Run the first-time setup when you want to connect an AI agent and choose event sources:
+
+```sh
+cargo run -p rescueloop -- setup
+```
+
+Install the background watcher when you want RescueLoop to start automatically:
 
 ```sh
 cargo build --release -p rescueloop
-target/release/rescueloop setup
+target/release/rescueloop service install
+target/release/rescueloop service status
 ```
-
-Install the background watcher:
-
-```sh
-rescueloop service install
-rescueloop service status
-```
-
-Then run `rescueloop` to open the terminal UI.
 
 Use `a` to analyze an incident, `r` to review a repair, and `y` to approve it.
 
