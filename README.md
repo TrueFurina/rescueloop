@@ -63,8 +63,8 @@ The main commands, close to the actual CLI output:
 
 | Command | What it does |
 | --- | --- |
-| `rescueloop` | Start the interactive console; watch and manage incidents |
-| `rescueloop run --record-args <cmd> [args...]` | Supervise a command and record its outcome for later verification |
+| `rescueloop` | Open the interactive incident console |
+| `rescueloop run --record-args <cmd> [args...]` | Supervise a command and save an incident when it fails |
 | `rescueloop service install` | Install the background watcher service |
 | `rescueloop service status` | Show the background service status |
 | `rescueloop mcp` | Start the read-only local MCP server |
@@ -73,7 +73,7 @@ The main commands, close to the actual CLI output:
 Examples:
 
 ```sh
-# Watch for crashes and manage incidents (interactive)
+# Open the interactive incident console
 rescueloop
 
 # Supervise a command (args recorded only with --record-args)
@@ -90,11 +90,14 @@ rescueloop --incident-dir /absolute/path/to/.rescueloop/incidents mcp
 On Windows, use the same commands from PowerShell with the compiled binary:
 
 ```powershell
-target\release\rescueloop.exe service install
-target\release\rescueloop.exe --incident-dir C:\absolute\path\.rescueloop\incidents mcp
+.\target\release\rescueloop.exe service install
+.\target\release\rescueloop.exe --incident-dir C:\absolute\path\.rescueloop\incidents mcp
 ```
 
 Use `a` to analyze an incident, `r` to review a repair, and `y` to approve it.
+
+Arguments may contain secrets, so RescueLoop records them only when `--record-args` is present. They
+are never included in evidence sent to an AI agent.
 
 ## Safety
 
