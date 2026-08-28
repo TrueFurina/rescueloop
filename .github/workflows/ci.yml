@@ -5,6 +5,10 @@ on:
     branches: [main]
   pull_request:
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   test:
     strategy:
@@ -44,6 +48,4 @@ jobs:
       - name: Windows idle performance smoke
         if: runner.os == 'Windows'
         shell: pwsh
-        run: |
-          cargo build --release -p rescueloop
-          ./scripts/benchmark-idle-windows.ps1 -DurationSeconds 30
+        run: ./scripts/benchmark-idle-windows.ps1 -DurationSeconds 30 -Binary target/debug/rescueloop.exe

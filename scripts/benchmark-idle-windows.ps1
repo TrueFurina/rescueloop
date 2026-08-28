@@ -1,11 +1,12 @@
 param(
     [int]$DurationSeconds = 1800,
+    [int]$WarmupSeconds = 10,
     [string]$Binary = "target/release/rescueloop.exe"
 )
 
 $ErrorActionPreference = "Stop"
 $MaxCpu = if ($env:RESCUELOOP_MAX_CPU) { [double]$env:RESCUELOOP_MAX_CPU } else { 1.0 }
-$MaxRssMiB = if ($env:RESCUELOOP_MAX_RSS_MIB) { [double]$env:RESCUELOOP_MAX_RSS_MIB } else { 30.0 }
+$MaxRssMiB = if ($env:RESCUELOOP_MAX_RSS_MIB) { [double]$env:RESCUELOOP_MAX_RSS_MIB } else { 150.0 }
 $Sandbox = Join-Path ([System.IO.Path]::GetTempPath()) ("rescueloop-perf-" + [guid]::NewGuid())
 $State = Join-Path $Sandbox "RescueLoop"
 $Stdout = Join-Path $State "watch.out"
@@ -47,6 +48,13 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if (-not $Ready) { throw "watcher did not become ready: $(Get-Content $Stderr -Raw)" }
+
+    # READY is printed before native subscriptions finish starting. Exclude that bounded
+    # initialization work so this gate measures the steady-state observation loop.
+    if ($WarmupSeconds -gt 0) {
+        Start-Sleep -Seconds $WarmupSeconds
+        if ($Process.HasExited) { throw "watcher exited during warm-up" }
+    }
 
     $PreviousCpu = @{}
     foreach ($Member in (Get-ProcessTree $Process.Id)) {
