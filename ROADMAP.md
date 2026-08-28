@@ -29,6 +29,11 @@ detection may be automatic, but repair must stay bounded, reviewable, verifiable
 
 - Add application-specific health checks and pluggable evidence collectors.
 - Support local and hosted models without tying the core to one provider.
+- Build a specialized diagnosis agent for crashes, logs, services, processes, and containers.
+- Let the agent request additional bounded evidence, explain its conclusions, and propose typed
+  repairs without giving it direct control of the machine.
+- Improve diagnosis with tested failure scenarios, evaluation sets, and feedback from verified
+  repair outcomes.
 - Link conclusions to the evidence that supports them.
 - Report confidence, ambiguity, and missing evidence plainly.
 

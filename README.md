@@ -2,6 +2,8 @@
 
 Your computer breaks. RescueLoop figures out why and helps fix it.
 
+**Lightweight enough to keep running. Careful enough to trust with recovery.**
+
 It runs in the background and watches for crashes, failed commands, broken services, resource problems,
 and unhealthy containers. When something goes wrong, RescueLoop keeps the useful evidence, finds the
 likely cause, and prepares a repair.
