@@ -27,15 +27,15 @@ This is foundational coverage, not a claim to detect every application-level err
 artifacts, container engines, macOS Unified Log and Windows Event Log are connected; deeper ETW,
 Endpoint Security and application-specific health probes remain future integrations.
 
-The background collector is event-driven rather than polling. See the explicit
-[performance budget](docs/performance-budget.md).
+The background collector is event-driven rather than polling and is checked by platform-specific
+idle-performance smoke tests.
 
 ## Operational logs
 
 Structured JSONL operational events are written to `.rescueloop/logs` with
 daily rotation and bounded retention. Inspect them with `rescueloop logs` or
 `rescueloop logs --lines 250`. Configure verbosity with `RUST_LOG` and retention
-with `RESCUELOOP_LOG_RETENTION_DAYS`. See the [logging contract](docs/logging.md).
+with `RESCUELOOP_LOG_RETENTION_DAYS`.
 
 ## Run
 
@@ -223,8 +223,8 @@ schemas with unknown fields rejected.
 Configure the MCP client with the absolute path to the `rescueloop` binary and the arguments above.
 Only configure it in clients and workspaces you trust: a local MCP process shares the launching
 client's operating-system security boundary.
-See the [MCP security and operations contract](docs/mcp-security.md) for the threat model and release
-checks.
+The MCP boundary is covered by protocol initialization, discovery, invalid-input, redaction, and
+absence-of-mutation-tool tests.
 
 ## Security boundary
 
@@ -245,4 +245,4 @@ Tagging `v*` runs the release workflow for macOS arm64/x86_64 and Windows x86_64
 
 The workflow signs macOS and Windows binaries when publisher certificates are configured. Public
 signing and Apple notarization require external credentials and cannot be completed from source code
-alone. See [release documentation](docs/releasing.md).
+alone.

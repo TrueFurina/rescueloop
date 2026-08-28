@@ -1,4 +1,26 @@
-/target
-/.rescueloop
+# Rust build outputs
+/target/
+**/*.rs.bk
+*.pdb
+
+# RescueLoop local runtime state
+/.rescueloop/
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
 .DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local documentation directory is intentionally not versioned
+/docs/
 
