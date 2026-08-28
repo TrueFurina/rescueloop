@@ -342,7 +342,7 @@ fn progress(label: &str, started: std::time::Instant) -> String {
 
 fn evidence_text(incident: &Incident, expanded: bool) -> String {
     let mut lines = vec![
-        format!("{}", incident.message),
+        incident.message.to_string(),
         String::new(),
         format!("Source       {}", incident_source_label(incident)),
         format!("Failure      {:?}", incident.kind),
